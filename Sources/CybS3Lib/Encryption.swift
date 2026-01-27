@@ -2,13 +2,13 @@ import Foundation
 import Crypto
 import SwiftBIP39
 
-enum EncryptionError: Error {
+public enum EncryptionError: Error {
     case encryptionFailed
     case decryptionFailed
     case invalidKey
 }
 
-struct Encryption {
+public struct Encryption {
     /// Derives a 256-bit SymmetricKey from the mnemonic phrase.
     ///
     /// The derivation process is as follows:
@@ -17,7 +17,7 @@ struct Encryption {
     ///
     /// - Parameter mnemonic: The 12-word mnemonic phrase.
     /// - Returns: A `SymmetricKey` suitable for AES-GCM.
-    static func deriveKey(mnemonic: [String]) throws -> SymmetricKey {
+    public static func deriveKey(mnemonic: [String]) throws -> SymmetricKey {
         // Use PBKDF2-HMAC-SHA512 (Standard BIP39)
         // 2048 rounds
         let password = mnemonic.joined(separator: " ").data(using: .utf8)!
@@ -125,7 +125,7 @@ struct Encryption {
     ///   - data: The plaintext data.
     ///   - key: The 256-bit symmetric key.
     /// - Returns: The combined seal (Nonce + Ciphertext + Tag).
-    static func encrypt(data: Data, key: SymmetricKey) throws -> Data {
+    public static func encrypt(data: Data, key: SymmetricKey) throws -> Data {
         // AES.GCM
         // We use a random Nonce
         let sealedBox = try AES.GCM.seal(data, using: key)
@@ -137,7 +137,7 @@ struct Encryption {
     ///   - data: The combined seal (Nonce + Ciphertext + Tag).
     ///   - key: The 256-bit symmetric key.
     /// - Returns: The plaintext data.
-    static func decrypt(data: Data, key: SymmetricKey) throws -> Data {
+    public static func decrypt(data: Data, key: SymmetricKey) throws -> Data {
         let sealedBox = try AES.GCM.SealedBox(combined: data)
         return try AES.GCM.open(sealedBox, using: key)
     }

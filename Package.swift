@@ -19,15 +19,26 @@ let package = Package(
         .package(url: "https://github.com/cybou-fr/SwiftBIP39.git", branch: "main"),
     ],
     targets: [
-        .executableTarget(
-            name: "CybS3",
+        .target(
+            name: "CybS3Lib",
             dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Logging", package: "swift-log"),
                 "SwiftBIP39",
             ]
+        ),
+        .executableTarget(
+            name: "CybS3",
+            dependencies: [
+                "CybS3Lib",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "SwiftBIP39",
+            ]
+        ),
+        .testTarget(
+            name: "CybS3Tests",
+            dependencies: ["CybS3Lib"]
         ),
     ]
 )

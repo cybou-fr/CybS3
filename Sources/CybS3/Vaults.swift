@@ -2,6 +2,7 @@ import Foundation
 import ArgumentParser
 import Crypto
 import SwiftBIP39
+import CybS3Lib
 
 // Common models (VaultConfig) are now in Services.swift potentially?
 // Or we need to redefine them or fix visibility.

@@ -4,6 +4,7 @@ import AsyncHTTPClient
 import SwiftBIP39
 import NIO
 import Crypto
+import CybS3Lib
 
 @main
 /// The main entry point for the CybS3 Command Line Interface.

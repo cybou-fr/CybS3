@@ -1,6 +1,7 @@
 import Foundation
 import ArgumentParser
 import SwiftBIP39
+import CybS3Lib
 
 extension CybS3 {
     struct Keys: AsyncParsableCommand {

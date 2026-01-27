@@ -8,51 +8,78 @@ import SwiftBIP39
 // MARK: - Models
 
 /// Stores application-wide defaults.
-struct AppSettings: Codable {
+// MARK: - Models
+
+/// Stores application-wide defaults.
+public struct AppSettings: Codable {
     /// Default AWS Region.
-    var defaultRegion: String?
+    public var defaultRegion: String?
     /// Default S3 Bucket.
-    var defaultBucket: String?
+    public var defaultBucket: String?
     /// Default S3 Endpoint.
-    var defaultEndpoint: String?
+    public var defaultEndpoint: String?
     /// Default Access Key ID.
-    var defaultAccessKey: String?
+    public var defaultAccessKey: String?
     /// Default Secret Access Key.
-    var defaultSecretKey: String?
+    public var defaultSecretKey: String?
+    
+    public init(defaultRegion: String? = nil, defaultBucket: String? = nil, defaultEndpoint: String? = nil, defaultAccessKey: String? = nil, defaultSecretKey: String? = nil) {
+        self.defaultRegion = defaultRegion
+        self.defaultBucket = defaultBucket
+        self.defaultEndpoint = defaultEndpoint
+        self.defaultAccessKey = defaultAccessKey
+        self.defaultSecretKey = defaultSecretKey
+    }
 }
 
 /// Stores configuration for a specific encrypted vault.
-struct VaultConfig: Codable {
+public struct VaultConfig: Codable {
     /// The display name of the vault.
-    var name: String
+    public var name: String
     /// The S3 endpoint URL.
-    var endpoint: String
+    public var endpoint: String
     /// The Access Key ID.
-    var accessKey: String
+    public var accessKey: String
     /// The Secret Access Key.
-    var secretKey: String
+    public var secretKey: String
     /// The AWS Region.
-    var region: String
+    public var region: String
     /// The associated S3 Bucket (optional).
-    var bucket: String?
+    public var bucket: String?
+    
+    public init(name: String, endpoint: String, accessKey: String, secretKey: String, region: String, bucket: String? = nil) {
+        self.name = name
+        self.endpoint = endpoint
+        self.accessKey = accessKey
+        self.secretKey = secretKey
+        self.region = region
+        self.bucket = bucket
+    }
 }
 
 /// The root configuration object that is encrypted and stored on disk.
-struct EncryptedConfig: Codable {
+public struct EncryptedConfig: Codable {
     /// Schema version.
-    var version: Int = 2
+    public var version: Int = 2
     /// Base64 encoded Data Key (32 bytes). Protected by the Master Key (Mnemonic).
     /// This key is used to encrypt/decrypt S3 files.
-    var dataKey: Data
+    public var dataKey: Data
     /// The name of the currently active vault.
-    var activeVaultName: String?
+    public var activeVaultName: String?
     /// List of configured vaults.
-    var vaults: [VaultConfig]
+    public var vaults: [VaultConfig]
     /// Application settings.
-    var settings: AppSettings
+    public var settings: AppSettings
+    
+    public init(dataKey: Data, activeVaultName: String? = nil, vaults: [VaultConfig], settings: AppSettings) {
+        self.dataKey = dataKey
+        self.activeVaultName = activeVaultName
+        self.vaults = vaults
+        self.settings = settings
+    }
 }
 
-enum StorageError: Error {
+public enum StorageError: Error {
     case configNotFound
     case oldVaultsFoundButMigrationFailed
     case decryptionFailed
@@ -64,7 +91,7 @@ enum StorageError: Error {
 ///
 /// The configuration is stored in `~/.cybs3/config.enc`.
 /// It is encrypted using a Master Key derived from the user's Mnemonic.
-struct StorageService {
+public struct StorageService {
     private static let configDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cybs3")
     
@@ -81,7 +108,7 @@ struct StorageService {
     /// - Parameter mnemonic: The user's mnemonic phrase used to derive the Master Key.
     /// - Returns: A tuple containing the `EncryptedConfig` and the `SymmetricKey` (Data Key) ready for use.
     /// - Throws: `StorageError` or `EncryptionError` if loading fails.
-    static func load(mnemonic: [String]) throws -> (EncryptedConfig, SymmetricKey) {
+    public static func load(mnemonic: [String]) throws -> (EncryptedConfig, SymmetricKey) {
         
         // 1. Ensure directory exists
         if !FileManager.default.fileExists(atPath: configDir.path) {
@@ -124,7 +151,7 @@ struct StorageService {
     /// - Parameters:
     ///   - config: The configuration object to save.
     ///   - mnemonic: The mnemonic used to encrypt the file.
-    static func save(_ config: EncryptedConfig, mnemonic: [String]) throws {
+    public static func save(_ config: EncryptedConfig, mnemonic: [String]) throws {
         let masterKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
         let data = try JSONEncoder().encode(config)
         let encryptedData = try EncryptionService.encrypt(data: data, key: masterKey)
@@ -142,7 +169,7 @@ struct StorageService {
     ///
     /// This allows the user to change their login mnemonic without losing access to their encrypted S3 data,
     /// because the Data Key (stored inside the config) is preserved and re-encrypted with the new mnemonic.
-    static func rotateKey(oldMnemonic: [String], newMnemonic: [String]) throws {
+    public static func rotateKey(oldMnemonic: [String], newMnemonic: [String]) throws {
         let (config, _) = try load(mnemonic: oldMnemonic)
         try save(config, mnemonic: newMnemonic)
         print("✅ Configuration re-encrypted with new mnemonic. Data Key preserved.")
@@ -224,9 +251,9 @@ struct StorageService {
 // MARK: - Interaction Service
 
 /// Helper service for CLI user interaction.
-struct InteractionService {
+public struct InteractionService {
     /// Prompts the user with a message and returns the input.
-    static func prompt(message: String) -> String? {
+    public static func prompt(message: String) -> String? {
         print(message)
         return readLine()?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -234,7 +261,7 @@ struct InteractionService {
     /// Prompts the user to enter their mnemonic phrase.
     ///
     /// Validates that the input is a valid 12-word BIP39 english mnemonic.
-    static func promptForMnemonic(purpose: String) throws -> [String] {
+    public static func promptForMnemonic(purpose: String) throws -> [String] {
         print("Enter your 12-word Mnemonic to \(purpose):")
         guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
             throw InteractionError.mnemonicRequired
@@ -246,22 +273,22 @@ struct InteractionService {
     }
 }
 
-enum InteractionError: Error {
+public enum InteractionError: Error {
     case mnemonicRequired
 }
 
 // MARK: - Encryption Service
 
-struct EncryptionService {
-    static func deriveKey(mnemonic: [String]) throws -> SymmetricKey {
+public struct EncryptionService {
+    public static func deriveKey(mnemonic: [String]) throws -> SymmetricKey {
         return try Encryption.deriveKey(mnemonic: mnemonic)
     }
     
-    static func encrypt(data: Data, key: SymmetricKey) throws -> Data {
+    public static func encrypt(data: Data, key: SymmetricKey) throws -> Data {
         return try Encryption.encrypt(data: data, key: key)
     }
     
-    static func decrypt(data: Data, key: SymmetricKey) throws -> Data {
+    public static func decrypt(data: Data, key: SymmetricKey) throws -> Data {
         return try Encryption.decrypt(data: data, key: key)
     }
 }

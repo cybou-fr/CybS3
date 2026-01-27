@@ -1,7 +1,7 @@
 import Foundation
 import Crypto
 
-enum StreamingEncryptionError: Error {
+public enum StreamingEncryptionError: Error {
     case encryptionFailed
     case decryptionFailed
     case invalidData
@@ -15,47 +15,38 @@ enum StreamingEncryptionError: Error {
 /// Each Encrypted Chunk Structure:
 /// ```
 /// | Nonce (12 bytes) | Ciphertext (chunkSize bytes) | Tag (16 bytes) |
-/// ```
-///
-/// - `chunkSize` is 1MB (1,048,576 bytes).
-/// - Total overhead per chunk is 28 bytes.
-/// - The total size of an encrypted part is `chunkSize + 28`.
-/// - The last chunk may be smaller than `chunkSize`, but will still have 28 bytes overhead.
-///
-struct StreamingEncryption {
+// MARK: - Generic Streaming Encryption
 
-    static let chunkSize = 1024 * 1024 
+public struct StreamingEncryption {
+
+    public static let chunkSize = 1024 * 1024 
     
     // Wrapper for SymmetricKey to allow Sendable conformance
-    // SymmetricKey is a value type wrapping SecureBytes.
-    /// A wrapper for `SymmetricKey` to allow Sendable conformance.
-    /// `SymmetricKey` internally wraps `SecureBytes` but is not marked Sendable in all versions.
     struct SendableKey: @unchecked Sendable {
         let key: SymmetricKey
     }
     
-    /// An AsyncSequence that encrypts an upstream file stream in chunks.
+    /// An AsyncSequence that encrypts an upstream stream of ByteBuffers in chunks.
     ///
-    /// Each chunk yielded by the upstream `FileHandleAsyncSequence` is encrypted as a separate AES-GCM block.
-    /// This allows for streaming uploads where the total size might be large, but we only keep one chunk in memory.
-    struct EncryptedStream: AsyncSequence, Sendable {
-        typealias Element = Data
+    /// Each chunk yielded by the upstream sequence is encrypted as a separate AES-GCM block.
+    public struct EncryptedStream<Upstream: AsyncSequence & Sendable>: AsyncSequence, Sendable where Upstream.Element == ByteBuffer {
+        public typealias Element = Data
         
-        let upstream: FileHandleAsyncSequence
+        let upstream: Upstream
         let keyWrapper: SendableKey
         
         var key: SymmetricKey { keyWrapper.key }
         
-        init(upstream: FileHandleAsyncSequence, key: SymmetricKey) {
+        public init(upstream: Upstream, key: SymmetricKey) {
             self.upstream = upstream
             self.keyWrapper = SendableKey(key: key)
         }
         
-        struct AsyncIterator: AsyncIteratorProtocol {
-            var upstreamIterator: FileHandleAsyncSequence.AsyncIterator
+        public struct AsyncIterator: AsyncIteratorProtocol {
+            var upstreamIterator: Upstream.AsyncIterator
             let key: SymmetricKey
             
-            mutating func next() async throws -> Data? {
+            public mutating func next() async throws -> Data? {
                 guard let chunk = try await upstreamIterator.next() else {
                     return nil
                 }
@@ -68,7 +59,7 @@ struct StreamingEncryption {
             }
         }
         
-        func makeAsyncIterator() -> AsyncIterator {
+        public func makeAsyncIterator() -> AsyncIterator {
             AsyncIterator(upstreamIterator: upstream.makeAsyncIterator(), key: key)
         }
     }
@@ -78,15 +69,15 @@ struct StreamingEncryption {
     /// - Important: The upstream must yield chunks that align with the encrypted block boundaries.
     ///   Since S3 or HTTP clients might buffer data differently, this stream implements buffering logic
     ///   to ensure it always processes complete encrypted blocks (chunkSize + 28 bytes).
-    struct DecryptedStream: AsyncSequence, Sendable {
-        typealias Element = Data
+    public struct DecryptedStream<Upstream: AsyncSequence & Sendable>: AsyncSequence, Sendable where Upstream.Element == Data {
+        public typealias Element = Data
         
-        let upstream: AsyncThrowingStream<Data, Error>
+        let upstream: Upstream
         let keyWrapper: SendableKey
         
         var key: SymmetricKey { keyWrapper.key }
         
-        init(upstream: AsyncThrowingStream<Data, Error>, key: SymmetricKey) {
+        public init(upstream: Upstream, key: SymmetricKey) {
             self.upstream = upstream
             self.keyWrapper = SendableKey(key: key)
         }
@@ -94,12 +85,12 @@ struct StreamingEncryption {
         // Size of a full encrypted block including overhead
         let fullWebBlockSize = StreamingEncryption.chunkSize + 28
         
-        struct AsyncIterator: AsyncIteratorProtocol {
-            var upstreamIterator: AsyncThrowingStream<Data, Error>.Iterator
+        public struct AsyncIterator: AsyncIteratorProtocol {
+            var upstreamIterator: Upstream.AsyncIterator
             let key: SymmetricKey
             var buffer = Data()
             
-            mutating func next() async throws -> Data? {
+            public mutating func next() async throws -> Data? {
                 // We need to accumulate at least enough data for one block or end of stream
                 
                 while true {
@@ -136,7 +127,7 @@ struct StreamingEncryption {
             }
         }
         
-        func makeAsyncIterator() -> AsyncIterator {
+        public func makeAsyncIterator() -> AsyncIterator {
             AsyncIterator(upstreamIterator: upstream.makeAsyncIterator(), key: key)
         }
     }

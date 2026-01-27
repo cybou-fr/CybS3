@@ -16,7 +16,8 @@ import FoundationXML
 // Re-export S3Object and S3Error for Commands.swift
 
 /// Errors that can occur during S3 operations.
-enum S3Error: Error {
+/// Errors that can occur during S3 operations.
+public enum S3Error: Error {
     /// The provided URL or endpoint was invalid.
     case invalidURL
     /// Authentication with S3 failed (e.g., invalid keys).
@@ -34,19 +35,25 @@ enum S3Error: Error {
 }
 
 /// Represents an S3 endpoint configuration.
-struct S3Endpoint {
+public struct S3Endpoint: Sendable {
     /// The hostname of the S3 service (e.g., `s3.amazonaws.com`).
-    let host: String
+    public let host: String
     /// The port number (usually 443 for HTTPS or 80 for HTTP).
-    let port: Int
+    public let port: Int
     /// Whether to use SSL/HTTPS.
-    let useSSL: Bool
+    public let useSSL: Bool
+    
+    public init(host: String, port: Int, useSSL: Bool) {
+        self.host = host
+        self.port = port
+        self.useSSL = useSSL
+    }
     
     /// Returns "https" or "http" based on `useSSL`.
-    var scheme: String { useSSL ? "https" : "http" }
+    public var scheme: String { useSSL ? "https" : "http" }
     
     /// Constructs a full URL from the endpoint components.
-    var url: URL? {
+    public var url: URL? {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
@@ -167,7 +174,9 @@ struct AWSV4Signer {
 
 /// An actor that manages S3 interactions such as listing buckets, objects, and uploading/downloading files.
 /// It uses `AsyncHTTPClient` for networking and `AWSV4Signer` for authentication.
-actor S3Client {
+/// An actor that manages S3 interactions such as listing buckets, objects, and uploading/downloading files.
+/// It uses `AsyncHTTPClient` for networking and `AWSV4Signer` for authentication.
+public actor S3Client {
     private let endpoint: S3Endpoint
     private let bucket: String?
     private let region: String
@@ -183,7 +192,7 @@ actor S3Client {
     ///   - secretKey: AWS Secret Access Key.
     ///   - bucket: Optional bucket name to use as context for operations.
     ///   - region: AWS Region (default "us-east-1").
-    init(
+    public init(
         endpoint: S3Endpoint,
         accessKey: String,
         secretKey: String,
@@ -254,7 +263,7 @@ actor S3Client {
     
     /// Lists all buckets owned by the authenticated sender.
     /// - Returns: An array of bucket names.
-    func listBuckets() async throws -> [String] {
+    public func listBuckets() async throws -> [String] {
         let request = try await buildRequest(method: "GET")
         
         let response = try await httpClient.execute(request, timeout: .seconds(30))
@@ -276,7 +285,7 @@ actor S3Client {
     ///   - prefix: Limits the response to keys that begin with the specified prefix.
     ///   - delimiter: A delimiter is a character you use to group keys.
     /// - Returns: An array of `S3Object`s.
-    func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
+    public func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         var objects: [S3Object] = []
@@ -364,7 +373,7 @@ actor S3Client {
     ///
     /// - Parameter key: The object key.
     /// - Returns: An `AsyncThrowingStream` supplying the object's data in chunks.
-    func getObjectStream(key: String) async throws -> AsyncThrowingStream<Data, Error> {
+    public func getObjectStream(key: String) async throws -> AsyncThrowingStream<Data, Error> {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         let path = key.hasPrefix("/") ? key : "/" + key
@@ -399,7 +408,7 @@ actor S3Client {
     ///   - key: The key to assign to the object.
     ///   - stream: An AsyncSequence of ByteBuffers providing the data.
     ///   - length: The total length of the upload (required for S3).
-    func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
+    public func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         let path = key.hasPrefix("/") ? key : "/" + key
@@ -421,7 +430,7 @@ actor S3Client {
     }
     
     /// Deletes the specified object from the bucket.
-    func deleteObject(key: String) async throws {
+    public func deleteObject(key: String) async throws {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         let path = key.hasPrefix("/") ? key : "/" + key
@@ -434,7 +443,7 @@ actor S3Client {
     }
     
     /// Creates a new bucket using the current region.
-    func createBucket(name: String) async throws {
+    public func createBucket(name: String) async throws {
         // Location constraint
         // FIX: strict check for us-east-1 to avoid errors on AWS S3
         let body: HTTPClientRequest.Body?
@@ -477,20 +486,27 @@ actor S3Client {
 // MARK: - Models
 
 /// Represents an object stored in S3 or a directory prefix.
-struct S3Object: CustomStringConvertible, Equatable, Hashable {
+public struct S3Object: CustomStringConvertible, Equatable, Hashable, Sendable {
     /// The key (path) of the object.
-    let key: String
+    public let key: String
     
     /// The size of the object in bytes.
-    let size: Int
+    public let size: Int
     
     /// The last modified date of the object.
-    let lastModified: Date
+    public let lastModified: Date
     
     /// Indicates if this object represents a directory (common prefix) in a delimited list.
-    let isDirectory: Bool
+    public let isDirectory: Bool
     
-    var description: String {
+    public init(key: String, size: Int, lastModified: Date, isDirectory: Bool) {
+        self.key = key
+        self.size = size
+        self.lastModified = lastModified
+        self.isDirectory = isDirectory
+    }
+    
+    public var description: String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         
@@ -551,19 +567,25 @@ extension String {
      var data: Data { Data(utf8) }
 }
 
-struct FileHandleAsyncSequence: AsyncSequence, Sendable {
-    typealias Element = ByteBuffer
+public struct FileHandleAsyncSequence: AsyncSequence, Sendable {
+    public typealias Element = ByteBuffer
     
-    let fileHandle: FileHandle
-    let chunkSize: Int
-    let progress: (@Sendable (Int) -> Void)?
+    public let fileHandle: FileHandle
+    public let chunkSize: Int
+    public let progress: (@Sendable (Int) -> Void)?
     
-    struct AsyncIterator: AsyncIteratorProtocol {
+    public init(fileHandle: FileHandle, chunkSize: Int, progress: (@Sendable (Int) -> Void)?) {
+        self.fileHandle = fileHandle
+        self.chunkSize = chunkSize
+        self.progress = progress
+    }
+    
+    public struct AsyncIterator: AsyncIteratorProtocol {
         let fileHandle: FileHandle
         let chunkSize: Int
         let progress: (@Sendable (Int) -> Void)?
         
-        mutating func next() async throws -> ByteBuffer? {
+        public mutating func next() async throws -> ByteBuffer? {
             let handle = fileHandle
             let size = chunkSize
             let callback = progress
@@ -579,7 +601,7 @@ struct FileHandleAsyncSequence: AsyncSequence, Sendable {
         }
     }
     
-    func makeAsyncIterator() -> AsyncIterator {
+    public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(fileHandle: fileHandle, chunkSize: chunkSize, progress: progress)
     }
 }
