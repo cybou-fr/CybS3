@@ -2,16 +2,18 @@ import Foundation
 import Crypto
 import AsyncHTTPClient
 import Logging
+import NIO
+import NIOHTTP1
+import NIOFoundationCompat
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
 #if canImport(FoundationXML)
 import FoundationXML
 #endif
-import NIOFoundationCompat
-import NIOHTTP1
-import NIO
 
+// Re-export S3Object and S3Error for Commands.swift
 enum S3Error: Error {
     case invalidURL
     case authenticationFailed
@@ -19,6 +21,7 @@ enum S3Error: Error {
     case invalidResponse
     case bucketNotFound
     case objectNotFound
+    case fileAccessFailed
 }
 
 struct S3Endpoint {
@@ -66,12 +69,6 @@ actor S3Client {
     }
     
     // MARK: - Authentication
-    
-    private func sign(string: String, secretKey: String) -> String {
-        let key = SymmetricKey(data: Data("AWS4\(secretKey)".utf8))
-        let signature = HMAC<SHA256>.authenticationCode(for: Data(string.utf8), using: key)
-        return Data(signature).map { String(format: "%02hhx", $0) }.joined()
-    }
     
     private func generateSignatureKey(secretKey: String, dateStamp: String, region: String, service: String) -> SymmetricKey {
         let kDate = HMAC<SHA256>.authenticationCode(
@@ -146,8 +143,9 @@ actor S3Client {
         path: String = "/",
         queryItems: [URLQueryItem] = [],
         headers: [String: String] = [:],
-        body: Data? = nil
-    ) async throws -> (HTTPClient.Request, String) {
+        body: HTTPClientRequest.Body? = nil,
+        bodyHash: String = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ) async throws -> HTTPClientRequest {
         guard let baseURL = endpoint.url else {
             throw S3Error.invalidURL
         }
@@ -156,18 +154,21 @@ actor S3Client {
         if let bucket = bucket {
             urlComponents?.host = "\(bucket).\(endpoint.host)"
         }
-        urlComponents?.path = path
         
+        // Ensure path starts with /
+        urlComponents?.path = path.hasPrefix("/") ? path : "/" + path
+        
+        // Sort query items for signing
         if !queryItems.isEmpty {
-            urlComponents?.queryItems = queryItems
+            urlComponents?.queryItems = queryItems.sorted { $0.name < $1.name }
         }
         
         guard let url = urlComponents?.url else {
             throw S3Error.invalidURL
         }
         
-        var request = URLRequest(url: url)
-        request.httpMethod = method
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = HTTPMethod(rawValue: method)
         
         let timestamp = iso8601DateFormatter.string(from: Date())
         let dateStamp = String(timestamp.prefix(8))
@@ -175,18 +176,35 @@ actor S3Client {
         var allHeaders = headers
         allHeaders["Host"] = url.host ?? endpoint.host
         allHeaders["x-amz-date"] = timestamp
-        allHeaders["x-amz-content-sha256"] = body?.sha256() ?? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        allHeaders["x-amz-content-sha256"] = bodyHash
         
         if body != nil {
-            allHeaders["Content-Type"] = "application/octet-stream"
+            // Content-Type should be set by caller or defaulted, but we need to ensure it's signed if present
+            // If caller didn't set it, we don't force it here unless we know for sure?
+            // AWS S3 usually expects Content-Type for PUT
         }
         
+        // Construct canonical query string
+        let canonicalQueryString = urlComponents?.queryItems?
+            .map { item in
+                let encodedName = item.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? item.name
+                let encodedValue = item.value?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                return "\(encodedName)=\(encodedValue)"
+            }
+            .joined(separator: "&") ?? ""
+
+        // Canonical Path should be URL encoded
+        // But for S3 signing, it's tricky.
+        // For basic ASCII keys, it's the path.
+        // Let's assume path is already properly encoded or simple for now.
+        let canonicalPath = url.path.isEmpty ? "/" : url.path
+
         let canonicalRequest = createCanonicalRequest(
             method: method,
-            path: url.path,
-            query: url.query ?? "",
+            path: canonicalPath,
+            query: canonicalQueryString,
             headers: allHeaders,
-            payloadHash: allHeaders["x-amz-content-sha256"]!
+            payloadHash: bodyHash
         )
         
         let stringToSign = createStringToSign(
@@ -207,39 +225,33 @@ actor S3Client {
             using: signatureKey
         ).map { String(format: "%02hhx", $0) }.joined()
         
-        let authHeader = "AWS4-HMAC-SHA256 Credential=\(accessKey)/\(dateStamp)/\(region)/s3/aws4_request, SignedHeaders=\(allHeaders.keys.map { $0.lowercased() }.sorted().joined(separator: ";")), Signature=\(signature)"
+        let signedHeaders = allHeaders.keys.map { $0.lowercased() }.sorted().joined(separator: ";")
+        let authHeader = "AWS4-HMAC-SHA256 Credential=\(accessKey)/\(dateStamp)/\(region)/s3/aws4_request, SignedHeaders=\(signedHeaders), Signature=\(signature)"
         
         allHeaders["Authorization"] = authHeader
         
-        var nioHeaders = HTTPHeaders()
         for (key, value) in allHeaders {
-            nioHeaders.add(name: key, value: value)
+            request.headers.add(name: key, value: value)
         }
         
-        var nioBody: HTTPClient.Body?
         if let body = body {
-            nioBody = .bytes(body)
+            request.body = body
         }
         
-        let nioRequest = try HTTPClient.Request(
-            url: url.absoluteString,
-            method: HTTPMethod(rawValue: method),
-            headers: nioHeaders,
-            body: nioBody
-        )
-        
-        return (nioRequest, canonicalRequest)
+        return request
     }
     
     // MARK: - Public API
     
     func listBuckets() async throws -> [String] {
-        let (request, _) = try await buildRequest(method: "GET")
+        let request = try await buildRequest(method: "GET")
         
-        let response = try await httpClient.execute(request: request).get()
-        guard let body = response.body else {
-            throw S3Error.invalidResponse
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        guard response.status == HTTPResponseStatus.ok else {
+            throw S3Error.requestFailed("Status: \(response.status)")
         }
+        
+        let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB max for XML
         
         let data = Data(buffer: body)
         let xml = try XMLDocument(data: data)
@@ -253,142 +265,245 @@ actor S3Client {
             throw S3Error.bucketNotFound
         }
         
-        var queryItems: [URLQueryItem] = []
-        if let prefix = prefix {
-            queryItems.append(URLQueryItem(name: "prefix", value: prefix))
-        }
-        if let delimiter = delimiter {
-            queryItems.append(URLQueryItem(name: "delimiter", value: delimiter))
-        }
-        
-        let (request, _) = try await buildRequest(
-            method: "GET",
-            path: "/",
-            queryItems: queryItems
-        )
-        
-        let response = try await httpClient.execute(request: request).get()
-        guard let body = response.body else {
-            throw S3Error.invalidResponse
-        }
-        
-        let data = Data(buffer: body)
-        let xml = try XMLDocument(data: data)
-        
         var objects: [S3Object] = []
+        var isTruncated = true
+        var continuationToken: String?
         
-        // Parse objects
-        let objectNodes = try xml.nodes(forXPath: "//ListBucketResult/Contents")
-        for node in objectNodes {
-            guard let key = (try? node.nodes(forXPath: "Key").first)?.stringValue,
-                  let lastModified = (try? node.nodes(forXPath: "LastModified").first)?.stringValue,
-                  let sizeString = (try? node.nodes(forXPath: "Size").first)?.stringValue,
-                  let size = Int(sizeString) else {
-                continue
+        let batchSize = 1000
+        
+        while isTruncated {
+            var queryItems: [URLQueryItem] = []
+            if let prefix = prefix {
+                queryItems.append(URLQueryItem(name: "prefix", value: prefix))
+            }
+            if let delimiter = delimiter {
+                queryItems.append(URLQueryItem(name: "delimiter", value: delimiter))
+            }
+            queryItems.append(URLQueryItem(name: "max-keys", value: String(batchSize)))
+            
+            // Handle V2 pagination (ContinuationToken)
+            // Note: S3 ListObjects V2 is generally preferred.
+            // But let's check if the previous implementation was V1 or V2?
+            // "GET /" without list-type=2 is V1.
+            // Let's switch to V2 for reliable pagination.
+            queryItems.append(URLQueryItem(name: "list-type", value: "2"))
+            
+            if let token = continuationToken {
+                queryItems.append(URLQueryItem(name: "continuation-token", value: token))
             }
             
-            objects.append(S3Object(
-                key: key,
-                size: size,
-                lastModified: iso8601DateFormatter.date(from: lastModified) ?? Date(),
-                isDirectory: false
-            ))
-        }
-        
-        // Parse prefixes (directories)
-        let prefixNodes = try xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
-        for node in prefixNodes {
-            guard let prefix = node.stringValue else { continue }
-            objects.append(S3Object(
-                key: prefix,
-                size: 0,
-                lastModified: Date(),
-                isDirectory: true
-            ))
+            let request = try await buildRequest(
+                method: "GET",
+                path: "/",
+                queryItems: queryItems
+            )
+            
+            let response = try await httpClient.execute(request, timeout: .seconds(30))
+            guard response.status == HTTPResponseStatus.ok else {
+                throw S3Error.requestFailed("Status: \(response.status)")
+            }
+            
+            let body = try await response.body.collect(upTo: 20 * 1024 * 1024) // 20MB buffer
+            let data = Data(buffer: body)
+            let xml = try XMLDocument(data: data)
+            
+            // Parse objects
+            // V2 path: //ListBucketResult/Contents
+            let objectNodes = try xml.nodes(forXPath: "//ListBucketResult/Contents")
+            for node in objectNodes {
+                guard let key = (try? node.nodes(forXPath: "Key").first)?.stringValue,
+                      let lastModified = (try? node.nodes(forXPath: "LastModified").first)?.stringValue,
+                      let sizeString = (try? node.nodes(forXPath: "Size").first)?.stringValue,
+                      let size = Int(sizeString) else {
+                    continue
+                }
+                
+                objects.append(S3Object(
+                    key: key,
+                    size: size,
+                    lastModified: iso8601DateFormatter.date(from: lastModified) ?? Date(),
+                    isDirectory: false
+                ))
+            }
+            
+            // Parse prefixes (directories)
+            let prefixNodes = try xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
+            for node in prefixNodes {
+                guard let prefix = node.stringValue else { continue }
+                // Avoid duplicates if paginated and prefixes repeat (unlikely in V2 but valid)
+                if !objects.contains(where: { $0.key == prefix && $0.isDirectory }) {
+                    objects.append(S3Object(
+                        key: prefix,
+                        size: 0,
+                        lastModified: Date(),
+                        isDirectory: true
+                    ))
+                }
+            }
+            
+            // Check truncation
+            if let truncatedNode = try? xml.nodes(forXPath: "//ListBucketResult/IsTruncated").first,
+               truncatedNode.stringValue?.lowercased() == "true" {
+                isTruncated = true
+                if let nextTokenNode = try? xml.nodes(forXPath: "//ListBucketResult/NextContinuationToken").first {
+                    continuationToken = nextTokenNode.stringValue
+                } else {
+                    // Should not happen in V2 if truncated
+                    isTruncated = false
+                }
+            } else {
+                isTruncated = false
+            }
         }
         
         return objects
     }
     
-    func getObject(key: String) async throws -> Data {
+    // Enhanced getObject returning AsyncThrowingStream
+    func getObjectStream(key: String) async throws -> AsyncThrowingStream<Data, Error> {
         guard bucket != nil else {
             throw S3Error.bucketNotFound
         }
         
-        let (request, _) = try await buildRequest(
+        let path = key.hasPrefix("/") ? key : "/" + key
+        let request = try await buildRequest(
             method: "GET",
-            path: "/\(key)"
+            path: path
         )
         
-        let response = try await httpClient.execute(request: request).get()
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
         guard response.status == HTTPResponseStatus.ok else {
-            throw S3Error.objectNotFound
+            if response.status == HTTPResponseStatus.notFound {
+                throw S3Error.objectNotFound
+            }
+            throw S3Error.requestFailed("Status: \(response.status)")
         }
         
-        guard let body = response.body else {
-            throw S3Error.invalidResponse
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    for try await buffer in response.body {
+                        let data = Data(buffer: buffer)
+                        continuation.yield(data)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
         }
-        
-        return Data(buffer: body)
     }
     
-    func putObject(key: String, data: Data) async throws {
-        guard bucket != nil else {
-            throw S3Error.bucketNotFound
+    // Legacy support for backward compatibility if needed, or convenience
+    func getObject(key: String) async throws -> Data {
+        var data = Data()
+        for try await chunk in try await getObjectStream(key: key) {
+            data.append(chunk)
         }
+        return data
+    }
+    
+    // Streaming Put using URLs (Files)
+    func putObject(key: String, fileURL: URL, progress: (@Sendable (Int) -> Void)? = nil) async throws {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
         
-        let (request, _) = try await buildRequest(
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
+        
+        // Calculate SHA256 of the file for signing?
+        // S3 requires x-amz-content-sha256 header.
+        // For streaming (UNSIGNED-PAYLOAD), we can use "UNSIGNED-PAYLOAD" as the hash value.
+        // This is safe for HTTPS.
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        
+        // We use a stream body
+        // Note: AHC requires AsyncSequence of ByteBuffers.
+        
+        let asyncBytes = FileHandleAsyncSequence(fileHandle: fileHandle, chunkSize: 64 * 1024, progress: progress)
+        let body = HTTPClientRequest.Body.stream(asyncBytes, length: .known(Int64(fileSize)))
+        
+        let request = try await buildRequest(
             method: "PUT",
-            path: "/\(key)",
-            body: data
+            path: path,
+            headers: ["Content-Type": "application/octet-stream"],
+            body: body,
+            bodyHash: "UNSIGNED-PAYLOAD" // Important for streaming without buffering entire file
         )
         
-        let response = try await httpClient.execute(request: request).get()
+        let response = try await httpClient.execute(request, timeout: .seconds(300)) // 5 minutes timeout for upload
         guard response.status == HTTPResponseStatus.ok else {
-            throw S3Error.requestFailed("Failed to upload object: \(response.status)")
+             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
+        }
+    }
+    
+    // Buffer Put for small data
+    func putObject(key: String, data: Data) async throws {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        
+        let bodyHash = data.sha256()
+        let body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
+        
+        let request = try await buildRequest(
+            method: "PUT",
+            path: path,
+            headers: ["Content-Type": "application/octet-stream"],
+            body: body,
+            bodyHash: bodyHash
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(60))
+        guard response.status == HTTPResponseStatus.ok else {
+             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
         }
     }
     
     func deleteObject(key: String) async throws {
-        guard bucket != nil else {
-            throw S3Error.bucketNotFound
-        }
+        guard bucket != nil else { throw S3Error.bucketNotFound }
         
-        let (request, _) = try await buildRequest(
-            method: "DELETE",
-            path: "/\(key)"
-        )
+        let path = key.hasPrefix("/") ? key : "/" + key
+        let request = try await buildRequest( method: "DELETE", path: path)
         
-        let response = try await httpClient.execute(request: request).get()
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
         guard response.status == HTTPResponseStatus.noContent else {
-            throw S3Error.requestFailed("Failed to delete object: \(response.status)")
+             throw S3Error.requestFailed("Failed to delete object: \(response.status)")
         }
     }
     
     func createBucket(name: String) async throws {
-        
-        let body = """
+        // Location constraint
+        let xmlStr = """
         <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
             <LocationConstraint>\(region)</LocationConstraint>
         </CreateBucketConfiguration>
-        """.data(using: .utf8)
+        """
+        let data = Data(xmlStr.utf8)
+        let bodyHash = data.sha256()
+        let body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
         
-        let (request, _) = try await buildRequest(
+        let request = try await buildRequest(
             method: "PUT",
             path: "/",
-            body: body
+            body: body,
+            bodyHash: bodyHash
         )
         
-        let response = try await httpClient.execute(request: request).get()
-        guard response.status == HTTPResponseStatus.ok else {
-            throw S3Error.requestFailed("Failed to create bucket: \(response.status)")
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        
+        if response.status != HTTPResponseStatus.ok {
+             // Read body to see error
+             let errBody = try? await response.body.collect(upTo: 1024 * 1024)
+             let errStr = errBody.map { String(buffer: $0) } ?? ""
+             throw S3Error.requestFailed("Failed to create bucket: \(response.status) \(errStr)")
         }
     }
 }
 
 // MARK: - Models
 
-struct S3Object: CustomStringConvertible {
+struct S3Object: CustomStringConvertible, Equatable, Hashable {
     let key: String
     let size: Int
     let lastModified: Date
@@ -422,7 +537,7 @@ struct S3Object: CustomStringConvertible {
     }
 }
 
-// MARK: - Extensions
+// MARK: - Extensions & Helpers
 
 private var iso8601DateFormatter: ISO8601DateFormatter {
     let formatter = ISO8601DateFormatter()
@@ -434,5 +549,42 @@ extension Data {
     func sha256() -> String {
         let hash = SHA256.hash(data: self)
         return hash.map { String(format: "%02hhx", $0) }.joined()
+    }
+}
+
+
+// Helper to convert FileHandle to AsyncSequence<ByteBuffer>
+struct FileHandleAsyncSequence: AsyncSequence, Sendable {
+    typealias Element = ByteBuffer
+    
+    let fileHandle: FileHandle
+    let chunkSize: Int
+    let progress: (@Sendable (Int) -> Void)?
+    
+    struct AsyncIterator: AsyncIteratorProtocol {
+        let fileHandle: FileHandle
+        let chunkSize: Int
+        let progress: (@Sendable (Int) -> Void)?
+        
+        mutating func next() async throws -> ByteBuffer? {
+            // Read data in background
+            // Use local capture to avoid capturing mutating self in Task
+            let handle = fileHandle
+            let size = chunkSize
+            let callback = progress
+            
+            return try await Task {
+                let data = try handle.read(upToCount: size)
+                guard let data = data, !data.isEmpty else {
+                    return nil
+                }
+                callback?(data.count)
+                return ByteBuffer(data: data)
+            }.value
+        }
+    }
+    
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(fileHandle: fileHandle, chunkSize: chunkSize, progress: progress)
     }
 }

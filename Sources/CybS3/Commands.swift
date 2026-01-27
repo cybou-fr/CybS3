@@ -56,16 +56,22 @@ struct CybS3: AsyncParsableCommand {
                 useSSL: useSSL
             )
             
-            let accessKey = accessKey ?? config.accessKey ?? ""
-            let secretKey = secretKey ?? config.secretKey ?? ""
-            let bucket = bucket ?? config.bucket
+            let envAccessKey = ProcessInfo.processInfo.environment["AWS_ACCESS_KEY_ID"]
+            let envSecretKey = ProcessInfo.processInfo.environment["AWS_SECRET_ACCESS_KEY"]
+            let envRegion = ProcessInfo.processInfo.environment["AWS_REGION"]
+            let envBucket = ProcessInfo.processInfo.environment["AWS_BUCKET"]
+            
+            let finalAccessKey = accessKey ?? envAccessKey ?? config.accessKey ?? ""
+            let finalSecretKey = secretKey ?? envSecretKey ?? config.secretKey ?? ""
+            let finalRegion = region != "us-east-1" ? region : (envRegion ?? config.region ?? "us-east-1")
+            let finalBucket = bucket ?? envBucket ?? config.bucket
             
             return S3Client(
                 endpoint: s3Endpoint,
-                accessKey: accessKey,
-                secretKey: secretKey,
-                bucket: bucket,
-                region: region
+                accessKey: finalAccessKey,
+                secretKey: finalSecretKey,
+                bucket: finalBucket,
+                region: finalRegion
             )
         }
         
@@ -139,12 +145,33 @@ extension CybS3 {
             }
             
             let client = try options.createClient()
-            let data = try await client.getObject(key: key)
-            
             let outputPath = output ?? FileManager.default.currentDirectoryPath + "/" + (key as NSString).lastPathComponent
+            let outputURL = URL(fileURLWithPath: outputPath)
             
-            try data.write(to: URL(fileURLWithPath: outputPath))
-            print("Downloaded \(key) to \(outputPath)")
+            // Create file if not exists or truncate
+            _ = FileManager.default.createFile(atPath: outputPath, contents: nil)
+            let fileHandle = try FileHandle(forWritingTo: outputURL)
+            
+            print("Downloading \(key) to \(outputPath)...")
+            var totalBytes = 0
+            
+            let stream = try await client.getObjectStream(key: key)
+            
+            for try await chunk in stream {
+                totalBytes += chunk.count
+                let mb = Double(totalBytes) / 1024 / 1024
+                print(String(format: "\rDownloaded: %.2f MB", mb), terminator: "")
+                
+                if #available(macOS 10.15.4, *) {
+                    try fileHandle.seekToEnd()
+                } else {
+                    fileHandle.seekToEndOfFile()
+                }
+                fileHandle.write(chunk)
+            }
+            
+            try fileHandle.close()
+            print("\nDownload Complete.")
         }
     }
 }
@@ -173,14 +200,37 @@ extension CybS3 {
             }
             
             let fileURL = URL(fileURLWithPath: file)
-            let data = try Data(contentsOf: fileURL)
+            // Verify file exists
+            guard FileManager.default.fileExists(atPath: file) else {
+                print("Error: File not found: \(file)")
+                throw ExitCode.failure
+            }
             
             let objectKey = key ?? fileURL.lastPathComponent
             
             let client = try options.createClient()
-            try await client.putObject(key: objectKey, data: data)
             
-            print("Uploaded \(file) to \(objectKey)")
+            print("Uploading \(file) to \(objectKey)...")
+            
+            // Shared state for progress
+            final class Progress: @unchecked Sendable {
+                var bytes = 0
+                let lock = NSLock()
+                func add(_ n: Int) -> Double {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    bytes += n
+                    return Double(bytes) / 1024 / 1024
+                }
+            }
+            let progress = Progress()
+            
+            try await client.putObject(key: objectKey, fileURL: fileURL) { bytes in
+                let mb = progress.add(bytes)
+                print(String(format: "\rUploaded: %.2f MB", mb), terminator: "")
+            }
+            
+            print("\nUpload Complete.")
         }
     }
 }
@@ -346,6 +396,14 @@ extension CybS3 {
             }
             
             let data = try JSONEncoder().encode(config)
+            
+            // Write with secure permissions (600 - read/write by owner only)
+            if !FileManager.default.fileExists(atPath: configPath.path) {
+                _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [FileAttributeKey.posixPermissions: 0o600])
+            } else {
+                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
+            }
+            
             try data.write(to: configPath)
             
             print("Configuration saved to \(configPath.path)")
