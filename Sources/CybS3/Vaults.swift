@@ -3,20 +3,19 @@ import ArgumentParser
 import Crypto
 import SwiftBIP39
 
-struct VaultConfig: Codable {
-    var name: String
-    var endpoint: String
-    var accessKey: String
-    var secretKey: String
-    var region: String
-    var bucket: String?
-}
-
-// Wrapper for the encrypted file
-struct SecureVaults: Codable {
-    var version: Int = 1
-    var vaults: [VaultConfig]
-}
+// Common models (VaultConfig) are now in Services.swift potentially?
+// Or we need to redefine them or fix visibility.
+// Services.swift defined `VaultConfig` inside `EncryptedConfig` usage.
+// Let's check Services.swift content again.
+// Services.swift uses `VaultConfig` but didn't define it? 
+// No, I defined `struct EncryptedConfig` which uses `[VaultConfig]`.
+// I MUST ensure VaultConfig is defined.
+// In the previous step I removed `Vaults.swift` logic but wait...
+// `Services.swift` assumed `VaultConfig` exists.
+// `Vaults.swift` defines `VaultConfig`?
+// If `Vaults.swift` still compiles, `VaultConfig` is there.
+// But I need to allow `Services.swift` to see it.
+// Structs in same module are visible.
 
 extension CybS3 {
     struct Vaults: AsyncParsableCommand {
@@ -44,7 +43,11 @@ extension CybS3.Vaults {
         var name: String
         
         func run() async throws {
-            // 1. Gather Vault Details
+            // 1. Authenticate first to load config
+            let mnemonic = try InteractionService.promptForMnemonic(purpose: "unlock configuration")
+            var (config, _) = try StorageService.load(mnemonic: mnemonic)
+            
+            // 2. Gather Vault Details
             guard let endpoint = InteractionService.prompt(message: "Enter S3 Endpoint (e.g. s3.amazonaws.com):"), !endpoint.isEmpty else { return }
             guard let accessKey = InteractionService.prompt(message: "Enter Access Key:"), !accessKey.isEmpty else { return }
             guard let secretKey = InteractionService.prompt(message: "Enter Secret Key:"), !secretKey.isEmpty else { return }
@@ -64,23 +67,10 @@ extension CybS3.Vaults {
                 bucket: finalBucket
             )
             
-            // 2. Get Mnemonic for Encryption
-            let mnemonic: [String]
-            do {
-                mnemonic = try InteractionService.promptForMnemonic(purpose: "encrypt this vault")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
-            }
-            
-            // 3. Add via Service
-            do {
-                try VaultService.addVault(newVault, mnemonic: mnemonic)
-                print("✅ Vault '\(name)' added successfully.")
-            } catch {
-                print("Error saving vault: \(error)")
-                throw ExitCode.failure
-            }
+            // 3. Save
+            config.vaults.append(newVault)
+            try StorageService.save(config, mnemonic: mnemonic)
+            print("✅ Vault '\(name)' added successfully.")
         }
     }
     
@@ -91,37 +81,26 @@ extension CybS3.Vaults {
         )
         
         func run() async throws {
-            let mnemonic: [String]
-            do {
-                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
+            let mnemonic = try InteractionService.promptForMnemonic(purpose: "unlock configuration")
+            let (config, _) = try StorageService.load(mnemonic: mnemonic)
+            
+            if config.vaults.isEmpty {
+                print("No vaults found.")
+                return
             }
             
-            do {
-                let vaults = try VaultService.loadVaults(mnemonic: mnemonic)
-                if vaults.isEmpty {
-                    print("No vaults found.")
-                    return
-                }
-                
-                print("\nEncrypted Vaults:")
+            print("\nEncrypted Vaults:")
+            print("------------------------------------------------")
+            for vault in config.vaults {
+                print("Name: \(vault.name)")
+                print("Endpoint: \(vault.endpoint)")
+                print("Bucket: \(vault.bucket ?? "N/A")")
+                print("Region: \(vault.region)")
                 print("------------------------------------------------")
-                for vault in vaults {
-                    print("Name: \(vault.name)")
-                    print("Endpoint: \(vault.endpoint)")
-                    print("Bucket: \(vault.bucket ?? "N/A")")
-                    print("Region: \(vault.region)")
-                    print("------------------------------------------------")
-                }
-            } catch {
-                print("Error loading/decrypting vaults: \(error)")
-                print("Make sure the mnemonic is correct and matches the one used to encrypt.")
-                throw ExitCode.failure
             }
         }
     }
+    
     struct Delete: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "delete",
@@ -132,21 +111,17 @@ extension CybS3.Vaults {
         var name: String
         
         func run() async throws {
-            let mnemonic: [String]
-            do {
-                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
-            } catch {
-                print("Error: \(error)")
+            let mnemonic = try InteractionService.promptForMnemonic(purpose: "unlock configuration")
+            var (config, _) = try StorageService.load(mnemonic: mnemonic)
+            
+            guard let index = config.vaults.firstIndex(where: { $0.name == name }) else {
+                print("Error: Vault '\(name)' not found.")
                 throw ExitCode.failure
             }
             
-            do {
-                try VaultService.deleteVault(name: name, mnemonic: mnemonic)
-                print("✅ Vault '\(name)' deleted successfully.")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
-            }
+            config.vaults.remove(at: index)
+            try StorageService.save(config, mnemonic: mnemonic)
+            print("✅ Vault '\(name)' deleted successfully.")
         }
     }
 
@@ -160,33 +135,25 @@ extension CybS3.Vaults {
         var name: String
         
         func run() async throws {
-             let mnemonic: [String]
-            do {
-                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
+            let mnemonic = try InteractionService.promptForMnemonic(purpose: "unlock configuration")
+            var (config, _) = try StorageService.load(mnemonic: mnemonic)
+            
+            guard let vault = config.vaults.first(where: { $0.name == name }) else {
+                 print("Error: Vault '\(name)' not found.")
+                 throw ExitCode.failure
             }
             
-            do {
-                let vault = try VaultService.getVault(name: name, mnemonic: mnemonic)
-                
-                // Apply to global config using ConfigService
-                var config = try ConfigService.loadConfig()
-                config.endpoint = vault.endpoint
-                config.accessKey = vault.accessKey
-                config.secretKey = vault.secretKey
-                config.region = vault.region
-                config.bucket = vault.bucket
-                
-                try ConfigService.saveConfig(config)
-                
-                print("✅ Vault '\(name)' selected. Configuration updated at \(ConfigService.configPath.path).")
-                
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
-            }
+            // Apply to global settings in the Unified Config
+            // This replaces the old logic of writing to separate config file
+            config.activeVaultName = vault.name
+            config.settings.defaultEndpoint = vault.endpoint
+            config.settings.defaultAccessKey = vault.accessKey
+            config.settings.defaultSecretKey = vault.secretKey
+            config.settings.defaultRegion = vault.region
+            config.settings.defaultBucket = vault.bucket
+            
+            try StorageService.save(config, mnemonic: mnemonic)
+            print("✅ Vault '\(name)' selected. Global settings updated.")
         }
     }
 }

@@ -3,6 +3,7 @@ import ArgumentParser
 import AsyncHTTPClient
 import SwiftBIP39
 import NIO
+import Crypto
 
 @main
 struct CybS3: AsyncParsableCommand {
@@ -26,7 +27,7 @@ struct CybS3: AsyncParsableCommand {
     
     struct GlobalOptions: ParsableArguments {
         @Option(name: .shortAndLong, help: "S3 endpoint URL")
-        var endpoint: String = "s3.amazonaws.com"
+        var endpoint: String?
         
         @Option(name: .shortAndLong, help: "Access key")
         var accessKey: String?
@@ -38,7 +39,7 @@ struct CybS3: AsyncParsableCommand {
         var bucket: String?
         
         @Option(name: .shortAndLong, help: "Region")
-        var region: String = "us-east-1"
+        var region: String?
         
         @Flag(name: .long, inversion: .prefixedNo, help: "Use SSL")
         var ssl: Bool = true
@@ -46,47 +47,69 @@ struct CybS3: AsyncParsableCommand {
         @Flag(name: .shortAndLong, help: "Verbose output")
         var verbose: Bool = false
         
-        func createClient() throws -> S3Client {
-            // Use ConfigService
-            let config = try ConfigService.loadConfig()
+        /// Creates a client and returns the CONFIGURATION (which contains the Datakey)
+        /// This forces the user to unlock the config (Mnemonic) for most operations.
+        func createClient() throws -> (S3Client, SymmetricKey, EncryptedConfig) {
             
-            let endpointURL = URL(string: endpoint) ?? URL(string: "https://\(endpoint)")!
-            let host = endpointURL.host ?? endpoint
-            let port = endpointURL.port ?? (ssl ? 443 : 80)
-            let useSSL = endpointURL.scheme == "https" || ssl
+            // 1. Prompt for Mnemonic to unlock Storage
+            // NOTE: Ideally we would cache this in a session or env var, but for CLI we prompt per command unless passed via ENV.
+            let mnemonic: [String]
+            if let envMnemonic = ProcessInfo.processInfo.environment["CYBS3_MNEMONIC"] {
+                 mnemonic = envMnemonic.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            } else {
+                 mnemonic = try InteractionService.promptForMnemonic(purpose: "unlock configuration")
+            }
+
+            // 2. Load Config & Data Key
+            let (config, dataKey) = try StorageService.load(mnemonic: mnemonic)
             
-            let s3Endpoint = S3Endpoint(
-                host: host,
-                port: port,
-                useSSL: useSSL
-            )
+            // 3. Resolve S3 settings
+            // Hierarchy: CLI Args -> Env Vars -> Config Settings
             
             let envAccessKey = ProcessInfo.processInfo.environment["AWS_ACCESS_KEY_ID"]
             let envSecretKey = ProcessInfo.processInfo.environment["AWS_SECRET_ACCESS_KEY"]
             let envRegion = ProcessInfo.processInfo.environment["AWS_REGION"]
             let envBucket = ProcessInfo.processInfo.environment["AWS_BUCKET"]
             
-            let finalAccessKey = accessKey ?? envAccessKey ?? config.accessKey ?? ""
-            let finalSecretKey = secretKey ?? envSecretKey ?? config.secretKey ?? ""
-            let finalRegion = region != "us-east-1" ? region : (envRegion ?? config.region ?? "us-east-1")
-            let finalBucket = bucket ?? envBucket ?? config.bucket
+            let finalAccessKey = accessKey ?? envAccessKey ?? config.settings.defaultAccessKey ?? ""
+            let finalSecretKey = secretKey ?? envSecretKey ?? config.settings.defaultSecretKey ?? ""
             
-            return S3Client(
+            // Default region logic
+            let configRegion = config.settings.defaultRegion
+            let finalRegion = region != nil ? region! : (envRegion ?? configRegion ?? "us-east-1")
+            
+            let finalBucket = bucket ?? envBucket ?? config.settings.defaultBucket
+            
+            // Endpoint logic
+            var host = "s3.amazonaws.com"
+            if let e = endpoint {
+                host = e
+            } else if let e = config.settings.defaultEndpoint {
+                host = e
+            }
+            
+            // Parse host/port/ssl from string
+            let endpointString = host.contains("://") ? host : "https://\(host)"
+            guard let url = URL(string: endpointString) else {
+                throw ExitCode.failure // Invalid URL
+            }
+            
+            let s3Endpoint = S3Endpoint(
+                host: url.host ?? host,
+                port: url.port ?? (url.scheme == "http" ? 80 : 443),
+                useSSL: url.scheme == "https"
+            )
+            
+            let client = S3Client(
                 endpoint: s3Endpoint,
                 accessKey: finalAccessKey,
                 secretKey: finalSecretKey,
                 bucket: finalBucket,
                 region: finalRegion
             )
+            
+            return (client, dataKey, config)
         }
-    }
-    
-    struct AppConfig: Codable {
-        var accessKey: String?
-        var secretKey: String?
-        var endpoint: String?
-        var region: String?
-        var bucket: String?
     }
 }
 
@@ -102,7 +125,7 @@ extension CybS3 {
         @OptionGroup var options: GlobalOptions
         
         func run() async throws {
-            let client = try options.createClient()
+            let (client, _, _) = try options.createClient()
             let buckets = try await client.listBuckets()
             
             print("Buckets:")
@@ -119,7 +142,7 @@ extension CybS3 {
     struct Get: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "get",
-            abstract: "Download an object from S3 (Decrypted by default)"
+            abstract: "Download an object from S3 (Decrypted automatically)"
         )
         
         @OptionGroup var options: GlobalOptions
@@ -131,39 +154,24 @@ extension CybS3 {
         var output: String?
         
         func run() async throws {
-            guard options.bucket != nil else {
-                print("Error: Bucket must be specified for get operation")
-                throw ExitCode.failure
-            }
+            let (client, dataKey, _) = try options.createClient()
             
-            // 1. Prompt for mnemonic to transparently decrypt
-            let mnemonic: [String]
-            do {
-                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt this file")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
-            }
+            // Ensure bucket is selected
+            // S3Client constructor handles this but check if needed
             
-            let client = try options.createClient()
             let outputPath = output ?? FileManager.default.currentDirectoryPath + "/" + (key as NSString).lastPathComponent
             let outputURL = URL(fileURLWithPath: outputPath)
             
-            // Create file if not exists or truncate
             _ = FileManager.default.createFile(atPath: outputPath, contents: nil)
             let fileHandle = try FileHandle(forWritingTo: outputURL)
             
             print("Downloading and Decrypting \(key) to \(outputPath)...")
             var totalBytes = 0
             
-            let fileDecryptionKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
+            // Use INTERNAL Data Key for decryption
             
-            // Get raw encrypted stream
             let encryptedStream = try await client.getObjectStream(key: key)
-            
-            // Decrypt stream
-            // Helper wrapper for the new S3Client stream type
-            let decryptedStream = StreamingEncryption.DecryptedStream(upstream: encryptedStream, key: fileDecryptionKey)
+            let decryptedStream = StreamingEncryption.DecryptedStream(upstream: encryptedStream, key: dataKey)
             
             for try await chunk in decryptedStream {
                 totalBytes += chunk.count
@@ -190,7 +198,7 @@ extension CybS3 {
     struct Put: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "put",
-            abstract: "Upload a file to S3 (Encrypted by default)"
+            abstract: "Upload a file to S3 (Encrypted automatically)"
         )
         
         @OptionGroup var options: GlobalOptions
@@ -202,47 +210,29 @@ extension CybS3 {
         var key: String?
         
         func run() async throws {
-            guard options.bucket != nil else {
-                print("Error: Bucket must be specified for put operation")
-                throw ExitCode.failure
-            }
-            
             let fileURL = URL(fileURLWithPath: file)
             guard FileManager.default.fileExists(atPath: file) else {
                 print("Error: File not found: \(file)")
                 throw ExitCode.failure
             }
             
-            // 1. Prompt for mnemonic to transparently encrypt
-            let mnemonic: [String]
-            do {
-                 mnemonic = try InteractionService.promptForMnemonic(purpose: "encrypt this file")
-            } catch {
-                print("Error: \(error)")
-                throw ExitCode.failure
-            }
+            let (client, dataKey, _) = try options.createClient()
             
             let objectKey = key ?? fileURL.lastPathComponent
-            let client = try options.createClient()
             
             print("Encrypting and Uploading \(file) to \(objectKey)...")
             
-            let fileEncryptionKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
-            
-            // 2. Prepare Encryption Stream
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
             
-            // Use FileHandleAsyncSequence from S3Client helpers
             let fileStream = FileHandleAsyncSequence(fileHandle: fileHandle, chunkSize: StreamingEncryption.chunkSize, progress: nil) // 1MB chunks
             
-            // EncryptedStream yields Data
-            let encryptedStream = StreamingEncryption.EncryptedStream(upstream: fileStream, key: fileEncryptionKey)
+            // Encrypt using INTERNAL Data Key
+            let encryptedStream = StreamingEncryption.EncryptedStream(upstream: fileStream, key: dataKey)
             
-            // Map Data -> ByteBuffer for S3Client
             let uploadStream = encryptedStream.map { ByteBuffer(data: $0) }
             
-            // Calculate total encrypted size
+            // Overhead calculation
             let fullChunks = fileSize / Int64(StreamingEncryption.chunkSize)
             let remainingBytes = fileSize % Int64(StreamingEncryption.chunkSize)
             var totalEncryptedSize = fullChunks * Int64(StreamingEncryption.chunkSize + 28)
@@ -272,14 +262,8 @@ extension CybS3 {
         var key: String
         
         func run() async throws {
-            guard options.bucket != nil else {
-                print("Error: Bucket must be specified for delete operation")
-                throw ExitCode.failure
-            }
-            
-            let client = try options.createClient()
+            let (client, _, _) = try options.createClient()
             try await client.deleteObject(key: key)
-            
             print("Deleted \(key)")
         }
     }
@@ -300,9 +284,8 @@ extension CybS3 {
         var bucket: String
         
         func run() async throws {
-            let client = try options.createClient()
+            let (client, _, _) = try options.createClient()
             try await client.createBucket(name: bucket)
-            
             print("Created bucket: \(bucket)")
         }
     }
@@ -324,7 +307,6 @@ extension CybS3 {
         
         func run() async throws {
             print("Note: Removing buckets requires the bucket to be empty first")
-            print("Use: cybs3 list to see objects, then delete them before removing bucket")
         }
     }
 }
@@ -345,13 +327,8 @@ extension CybS3 {
         var path: String?
         
         func run() async throws {
-            guard options.bucket != nil else {
-                print("Error: Bucket must be specified")
-                print("Use: cybs3 --bucket <bucket-name> ls")
-                throw ExitCode.failure
-            }
+             let (client, _, _) = try options.createClient()
             
-            let client = try options.createClient()
             let objects = try await client.listObjects(prefix: path)
             
             for object in objects {
@@ -386,32 +363,37 @@ extension CybS3 {
         var bucket: String?
         
         func run() async throws {
-            var config = try ConfigService.loadConfig()
+            let mnemonic = try InteractionService.promptForMnemonic(purpose: "update configuration")
+            var (config, _) = try StorageService.load(mnemonic: mnemonic)
             
+            var changed = false
             if let accessKey = accessKey {
-                config.accessKey = accessKey
+                config.settings.defaultAccessKey = accessKey
+                changed = true
             }
-            
             if let secretKey = secretKey {
-                config.secretKey = secretKey
+                config.settings.defaultSecretKey = secretKey
+                changed = true
             }
-            
             if let endpoint = endpoint {
-                config.endpoint = endpoint
+                config.settings.defaultEndpoint = endpoint
+                changed = true
             }
-            
             if let region = region {
-                config.region = region
+                config.settings.defaultRegion = region
+                changed = true
             }
-            
             if let bucket = bucket {
-                config.bucket = bucket
+                config.settings.defaultBucket = bucket
+                changed = true
             }
             
-            // Use ConfigService
-            try ConfigService.saveConfig(config)
-            
-            print("Configuration saved to \(ConfigService.configPath.path)")
+            if changed {
+                try StorageService.save(config, mnemonic: mnemonic)
+                print("Configuration saved.")
+            } else {
+                print("No changes made.")
+            }
         }
     }
 }
