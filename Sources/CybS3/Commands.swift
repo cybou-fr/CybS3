@@ -1,6 +1,5 @@
 import Foundation
 import ArgumentParser
-import ArgumentParser
 import AsyncHTTPClient
 import SwiftBIP39
 import NIO
@@ -48,7 +47,8 @@ struct CybS3: AsyncParsableCommand {
         var verbose: Bool = false
         
         func createClient() throws -> S3Client {
-            let config = try loadConfig()
+            // Use ConfigService
+            let config = try ConfigService.loadConfig()
             
             let endpointURL = URL(string: endpoint) ?? URL(string: "https://\(endpoint)")!
             let host = endpointURL.host ?? endpoint
@@ -78,19 +78,6 @@ struct CybS3: AsyncParsableCommand {
                 bucket: finalBucket,
                 region: finalRegion
             )
-        }
-        
-        private func loadConfig() throws -> AppConfig {
-            let configPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".cybs3")
-                .appendingPathExtension("json")
-            
-            guard FileManager.default.fileExists(atPath: configPath.path) else {
-                return AppConfig()
-            }
-            
-            let data = try Data(contentsOf: configPath)
-            return try JSONDecoder().decode(AppConfig.self, from: data)
         }
     }
     
@@ -150,18 +137,11 @@ extension CybS3 {
             }
             
             // 1. Prompt for mnemonic to transparently decrypt
-            print("Enter your 12-word Mnemonic to decrypt this file:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required for decryption.")
-                throw ExitCode.failure
-            }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-            
-            // Validate mnemonic
+            let mnemonic: [String]
             do {
-                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic, language: .english)
+                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt this file")
             } catch {
-                print("Error: Invalid mnemonic: \(error)")
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
             
@@ -176,12 +156,13 @@ extension CybS3 {
             print("Downloading and Decrypting \(key) to \(outputPath)...")
             var totalBytes = 0
             
-            let fileDecryptionKey = try Encryption.deriveKey(mnemonic: mnemonic)
+            let fileDecryptionKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
             
             // Get raw encrypted stream
             let encryptedStream = try await client.getObjectStream(key: key)
             
             // Decrypt stream
+            // Helper wrapper for the new S3Client stream type
             let decryptedStream = StreamingEncryption.DecryptedStream(upstream: encryptedStream, key: fileDecryptionKey)
             
             for try await chunk in decryptedStream {
@@ -227,25 +208,17 @@ extension CybS3 {
             }
             
             let fileURL = URL(fileURLWithPath: file)
-            // Verify file exists
             guard FileManager.default.fileExists(atPath: file) else {
                 print("Error: File not found: \(file)")
                 throw ExitCode.failure
             }
             
             // 1. Prompt for mnemonic to transparently encrypt
-            print("Enter your 12-word Mnemonic to encrypt this file:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required for encryption.")
-                throw ExitCode.failure
-            }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-            
-            // Validate mnemonic
+            let mnemonic: [String]
             do {
-                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic, language: .english)
+                 mnemonic = try InteractionService.promptForMnemonic(purpose: "encrypt this file")
             } catch {
-                print("Error: Invalid mnemonic: \(error)")
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
             
@@ -254,30 +227,22 @@ extension CybS3 {
             
             print("Encrypting and Uploading \(file) to \(objectKey)...")
             
-            let fileEncryptionKey = try Encryption.deriveKey(mnemonic: mnemonic)
+            let fileEncryptionKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
             
             // 2. Prepare Encryption Stream
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
             
+            // Use FileHandleAsyncSequence from S3Client helpers
             let fileStream = FileHandleAsyncSequence(fileHandle: fileHandle, chunkSize: StreamingEncryption.chunkSize, progress: nil) // 1MB chunks
-            // My StreamingEncryption.EncryptedStream was written to take `FileHandleAsyncSequence` as upstream.
-            // Let's check StreamingEncryption.swift again.
-            // It expects `FileHandleAsyncSequence`.
-            // AND `FileHandleAsyncSequence` in S3Client yields `ByteBuffer`.
-            // `EncryptedStream` implementation I wrote: `let data = Data(buffer: chunk)`
-            // So it converts ByteBuffer to Data.
-            // Then it yields `Data`.
             
-            // We need to convert `Data` back to `ByteBuffer` for `S3Client.putObject`.
-            
+            // EncryptedStream yields Data
             let encryptedStream = StreamingEncryption.EncryptedStream(upstream: fileStream, key: fileEncryptionKey)
             
-            // Map Data -> ByteBuffer for upload
+            // Map Data -> ByteBuffer for S3Client
             let uploadStream = encryptedStream.map { ByteBuffer(data: $0) }
             
             // Calculate total encrypted size
-            // Overhead per chunk (1MB) = 28 bytes.
             let fullChunks = fileSize / Int64(StreamingEncryption.chunkSize)
             let remainingBytes = fileSize % Int64(StreamingEncryption.chunkSize)
             var totalEncryptedSize = fullChunks * Int64(StreamingEncryption.chunkSize + 28)
@@ -421,16 +386,7 @@ extension CybS3 {
         var bucket: String?
         
         func run() async throws {
-            let configPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".cybs3")
-                .appendingPathExtension("json")
-            
-            var config = CybS3.AppConfig()
-            
-            if FileManager.default.fileExists(atPath: configPath.path) {
-                let data = try Data(contentsOf: configPath)
-                config = try JSONDecoder().decode(CybS3.AppConfig.self, from: data)
-            }
+            var config = try ConfigService.loadConfig()
             
             if let accessKey = accessKey {
                 config.accessKey = accessKey
@@ -452,18 +408,10 @@ extension CybS3 {
                 config.bucket = bucket
             }
             
-            let data = try JSONEncoder().encode(config)
+            // Use ConfigService
+            try ConfigService.saveConfig(config)
             
-            // Write with secure permissions (600 - read/write by owner only)
-            if !FileManager.default.fileExists(atPath: configPath.path) {
-                _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [FileAttributeKey.posixPermissions: 0o600])
-            } else {
-                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
-            }
-            
-            try data.write(to: configPath)
-            
-            print("Configuration saved to \(configPath.path)")
+            print("Configuration saved to \(ConfigService.configPath.path)")
         }
     }
 }

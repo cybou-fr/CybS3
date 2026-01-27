@@ -45,21 +45,14 @@ extension CybS3.Vaults {
         
         func run() async throws {
             // 1. Gather Vault Details
-            print("Enter S3 Endpoint (e.g. s3.amazonaws.com):")
-            guard let endpoint = readLine(), !endpoint.isEmpty else { return }
+            guard let endpoint = InteractionService.prompt(message: "Enter S3 Endpoint (e.g. s3.amazonaws.com):"), !endpoint.isEmpty else { return }
+            guard let accessKey = InteractionService.prompt(message: "Enter Access Key:"), !accessKey.isEmpty else { return }
+            guard let secretKey = InteractionService.prompt(message: "Enter Secret Key:"), !secretKey.isEmpty else { return }
             
-            print("Enter Access Key:")
-            guard let accessKey = readLine(), !accessKey.isEmpty else { return }
-            
-            print("Enter Secret Key:")
-            guard let secretKey = readLine(), !secretKey.isEmpty else { return }
-            
-            print("Enter Region (default: us-east-1):")
-            let region = readLine() ?? "us-east-1"
+            let region = InteractionService.prompt(message: "Enter Region (default: us-east-1):") ?? "us-east-1"
             let finalRegion = region.isEmpty ? "us-east-1" : region
             
-            print("Enter Bucket (optional):")
-            let bucket = readLine()
+            let bucket = InteractionService.prompt(message: "Enter Bucket (optional):")
             let finalBucket = (bucket?.isEmpty ?? true) ? nil : bucket
             
             let newVault = VaultConfig(
@@ -72,27 +65,22 @@ extension CybS3.Vaults {
             )
             
             // 2. Get Mnemonic for Encryption
-            print("\nEnter your 12-word Mnemonic to encrypt this vault:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required.")
-                throw ExitCode.failure
-            }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-            
+            let mnemonic: [String]
             do {
-                try BIP39.validate(mnemonic: mnemonic, language: .english)
+                mnemonic = try InteractionService.promptForMnemonic(purpose: "encrypt this vault")
             } catch {
-                print("Error: Invalid mnemonic: \(error)")
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
             
-            // 3. Load existing vaults (if any) and append
-            var currentVaults = try loadVaults(mnemonic: mnemonic)
-            currentVaults.append(newVault)
-            
-            // 4. Save
-            try saveVaults(currentVaults, mnemonic: mnemonic)
-            print("✅ Vault '\(name)' added successfully.")
+            // 3. Add via Service
+            do {
+                try VaultService.addVault(newVault, mnemonic: mnemonic)
+                print("✅ Vault '\(name)' added successfully.")
+            } catch {
+                print("Error saving vault: \(error)")
+                throw ExitCode.failure
+            }
         }
     }
     
@@ -103,15 +91,16 @@ extension CybS3.Vaults {
         )
         
         func run() async throws {
-            print("Enter your 12-word Mnemonic to decrypt vaults:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required.")
+            let mnemonic: [String]
+            do {
+                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
+            } catch {
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             
             do {
-                let vaults = try loadVaults(mnemonic: mnemonic)
+                let vaults = try VaultService.loadVaults(mnemonic: mnemonic)
                 if vaults.isEmpty {
                     print("No vaults found.")
                     return
@@ -143,23 +132,16 @@ extension CybS3.Vaults {
         var name: String
         
         func run() async throws {
-            print("Enter your 12-word Mnemonic to decrypt vaults:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required.")
+            let mnemonic: [String]
+            do {
+                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
+            } catch {
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             
             do {
-                var vaults = try loadVaults(mnemonic: mnemonic)
-                
-                guard let index = vaults.firstIndex(where: { $0.name == name }) else {
-                    print("Error: Vault '\(name)' not found.")
-                    throw ExitCode.failure
-                }
-                
-                vaults.remove(at: index)
-                try saveVaults(vaults, mnemonic: mnemonic)
+                try VaultService.deleteVault(name: name, mnemonic: mnemonic)
                 print("✅ Vault '\(name)' deleted successfully.")
             } catch {
                 print("Error: \(error)")
@@ -178,43 +160,28 @@ extension CybS3.Vaults {
         var name: String
         
         func run() async throws {
-            print("Enter your 12-word Mnemonic to decrypt vaults:")
-            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
-                print("Error: Mnemonic required.")
+             let mnemonic: [String]
+            do {
+                mnemonic = try InteractionService.promptForMnemonic(purpose: "decrypt vaults")
+            } catch {
+                print("Error: \(error)")
                 throw ExitCode.failure
             }
-            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             
             do {
-                let vaults = try loadVaults(mnemonic: mnemonic)
+                let vault = try VaultService.getVault(name: name, mnemonic: mnemonic)
                 
-                guard let vault = vaults.first(where: { $0.name == name }) else {
-                    print("Error: Vault '\(name)' not found.")
-                    throw ExitCode.failure
-                }
-                
-                // Apply to global config
-                let configPath = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".cybs3")
-                    .appendingPathExtension("json")
-                
-                var config = CybS3.AppConfig()
+                // Apply to global config using ConfigService
+                var config = try ConfigService.loadConfig()
                 config.endpoint = vault.endpoint
                 config.accessKey = vault.accessKey
                 config.secretKey = vault.secretKey
                 config.region = vault.region
                 config.bucket = vault.bucket
                 
-                let data = try JSONEncoder().encode(config)
+                try ConfigService.saveConfig(config)
                 
-                if !FileManager.default.fileExists(atPath: configPath.path) {
-                    _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [.posixPermissions: 0o600])
-                } else {
-                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
-                }
-                
-                try data.write(to: configPath)
-                print("✅ Vault '\(name)' selected. Configuration updated at \(configPath.path).")
+                print("✅ Vault '\(name)' selected. Configuration updated at \(ConfigService.configPath.path).")
                 
             } catch {
                 print("Error: \(error)")
@@ -222,43 +189,4 @@ extension CybS3.Vaults {
             }
         }
     }
-}
-
-// Helpers
-private func getVaultsFilePath() -> URL {
-    return FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".cybs3.vaults")
-}
-
-private func loadVaults(mnemonic: [String]) throws -> [VaultConfig] {
-    let file = getVaultsFilePath()
-    guard FileManager.default.fileExists(atPath: file.path) else {
-        return []
-    }
-    
-    let encryptedData = try Data(contentsOf: file)
-    let key = try Encryption.deriveKey(mnemonic: mnemonic)
-    
-    do {
-        let decryptedData = try Encryption.decrypt(data: encryptedData, key: key)
-        let secureVaults = try JSONDecoder().decode(SecureVaults.self, from: decryptedData)
-        return secureVaults.vaults
-    } catch {
-        print("Decryption failed. Ensure your mnemonic is correct.")
-        throw error
-    }
-}
-
-private func saveVaults(_ vaults: [VaultConfig], mnemonic: [String]) throws {
-    let file = getVaultsFilePath()
-    let secureVaults = SecureVaults(vaults: vaults)
-    let data = try JSONEncoder().encode(secureVaults)
-    
-    let key = try Encryption.deriveKey(mnemonic: mnemonic)
-    let encryptedData = try Encryption.encrypt(data: data, key: key)
-    
-    if !FileManager.default.fileExists(atPath: file.path) {
-         _ = FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
-    }
-    try encryptedData.write(to: file)
 }

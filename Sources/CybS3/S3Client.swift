@@ -39,13 +39,110 @@ struct S3Endpoint {
     }
 }
 
+// MARK: - AWS V4 Signer
+
+struct AWSV4Signer {
+    let accessKey: String
+    let secretKey: String
+    let region: String
+    let service: String = "s3"
+    
+    func sign(
+        request: inout HTTPClientRequest,
+        url: URL,
+        method: String,
+        bodyHash: String,
+        headers: [String: String],
+        now: Date = Date()
+    ) {
+        let timestamp = iso8601DateFormatter.string(from: now)
+        let dateStamp = String(timestamp.prefix(8))
+        
+        // 1. Prepare Headers
+        request.headers.add(name: "Host", value: url.host ?? "")
+        request.headers.add(name: "x-amz-date", value: timestamp)
+        request.headers.add(name: "x-amz-content-sha256", value: bodyHash)
+        
+        for (k, v) in headers {
+            request.headers.add(name: k, value: v)
+        }
+        
+        // 2. Canonical Request
+        // Headers for signing need to be sorted and lowercase
+        var signedHeadersDict: [String: String] = [
+            "host": url.host ?? "",
+            "x-amz-date": timestamp,
+            "x-amz-content-sha256": bodyHash
+        ]
+        
+        for (k, v) in headers {
+            signedHeadersDict[k.lowercased()] = v.trimmingCharacters(in: .whitespaces)
+        }
+        
+        let signedHeadersKeys = signedHeadersDict.keys.sorted()
+        let signedHeadersString = signedHeadersKeys.joined(separator: ";")
+        
+        let canonicalHeaders = signedHeadersKeys.map { key in
+            "\(key):\(signedHeadersDict[key]!)"
+        }.joined(separator: "\n")
+        
+        // Canonical Query
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let canonicalQuery = components?.queryItems?
+            .sorted { $0.name < $1.name }
+            .map { item in
+                let encodedName = item.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? item.name
+                let encodedValue = item.value?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                return "\(encodedName)=\(encodedValue)"
+            }
+            .joined(separator: "&") ?? ""
+            
+        let canonicalPath = url.path.isEmpty ? "/" : url.path
+        
+        let canonicalRequest = [
+            method,
+            canonicalPath,
+            canonicalQuery,
+            canonicalHeaders + "\n",
+            signedHeadersString,
+            bodyHash
+        ].joined(separator: "\n")
+        
+        // 3. String to Sign
+        let credentialScope = "\(dateStamp)/\(region)/\(service)/aws4_request"
+        let stringToSign = [
+            "AWS4-HMAC-SHA256",
+            timestamp,
+            credentialScope,
+            SHA256.hash(data: Data(canonicalRequest.utf8)).hexString
+        ].joined(separator: "\n")
+        
+        // 4. Signature
+        let signingKey = getSignatureKey(secret: secretKey, dateStamp: dateStamp, region: region, service: service)
+        let signature = Data(HMAC<SHA256>.authenticationCode(for: Data(stringToSign.utf8), using: signingKey)).hexString
+        
+        let authHeader = "AWS4-HMAC-SHA256 Credential=\(accessKey)/\(credentialScope), SignedHeaders=\(signedHeadersString), Signature=\(signature)"
+        request.headers.add(name: "Authorization", value: authHeader)
+    }
+    
+    private func getSignatureKey(secret: String, dateStamp: String, region: String, service: String) -> SymmetricKey {
+        let kSecret = SymmetricKey(data: Data("AWS4\(secret)".utf8))
+        let kDate = HMAC<SHA256>.authenticationCode(for: Data(dateStamp.utf8), using: kSecret)
+        let kRegion = HMAC<SHA256>.authenticationCode(for: Data(region.utf8), using: SymmetricKey(data: kDate))
+        let kService = HMAC<SHA256>.authenticationCode(for: Data(service.utf8), using: SymmetricKey(data: kRegion))
+        let kSigning = HMAC<SHA256>.authenticationCode(for: Data("aws4_request".utf8), using: SymmetricKey(data: kService))
+        return SymmetricKey(data: kSigning)
+    }
+}
+
+// MARK: - S3 Client
+
 actor S3Client {
     private let endpoint: S3Endpoint
-    private let accessKey: String
-    private let secretKey: String
     private let bucket: String?
     private let region: String
     private let httpClient: HTTPClient
+    private let signer: AWSV4Signer
     private let logger: Logger
     
     init(
@@ -56,84 +153,15 @@ actor S3Client {
         region: String = "us-east-1"
     ) {
         self.endpoint = endpoint
-        self.accessKey = accessKey
-        self.secretKey = secretKey
         self.bucket = bucket
         self.region = region
         self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        self.signer = AWSV4Signer(accessKey: accessKey, secretKey: secretKey, region: region)
         self.logger = Logger(label: "com.cybs3.client")
     }
     
     deinit {
         try? httpClient.syncShutdown()
-    }
-    
-    // MARK: - Authentication
-    
-    private func generateSignatureKey(secretKey: String, dateStamp: String, region: String, service: String) -> SymmetricKey {
-        let kDate = HMAC<SHA256>.authenticationCode(
-            for: Data(dateStamp.utf8),
-            using: SymmetricKey(data: Data("AWS4\(secretKey)".utf8))
-        )
-        let kRegion = HMAC<SHA256>.authenticationCode(
-            for: Data(region.utf8),
-            using: SymmetricKey(data: Data(kDate))
-        )
-        let kService = HMAC<SHA256>.authenticationCode(
-            for: Data(service.utf8),
-            using: SymmetricKey(data: Data(kRegion))
-        )
-        let kSigning = HMAC<SHA256>.authenticationCode(
-            for: Data("aws4_request".utf8),
-            using: SymmetricKey(data: Data(kService))
-        )
-        return SymmetricKey(data: Data(kSigning))
-    }
-    
-    private func createCanonicalRequest(
-        method: String,
-        path: String,
-        query: String = "",
-        headers: [String: String],
-        payloadHash: String
-    ) -> String {
-        let canonicalHeaders = headers
-            .map { "\($0.key.lowercased()):\($0.value.trimmingCharacters(in: .whitespaces))" }
-            .sorted()
-            .joined(separator: "\n")
-        
-        let signedHeaders = headers
-            .keys
-            .map { $0.lowercased() }
-            .sorted()
-            .joined(separator: ";")
-        
-        return [
-            method,
-            path,
-            query,
-            canonicalHeaders + "\n",
-            signedHeaders,
-            payloadHash
-        ].joined(separator: "\n")
-    }
-    
-    private func createStringToSign(
-        timestamp: String,
-        region: String,
-        canonicalRequest: String
-    ) -> String {
-        let dateStamp = String(timestamp.prefix(8))
-        let canonicalRequestHash = SHA256.hash(data: Data(canonicalRequest.utf8))
-            .map { String(format: "%02hhx", $0) }
-            .joined()
-        
-        return [
-            "AWS4-HMAC-SHA256",
-            timestamp,
-            "\(dateStamp)/\(region)/s3/aws4_request",
-            canonicalRequestHash
-        ].joined(separator: "\n")
     }
     
     // MARK: - Request Building
@@ -158,9 +186,8 @@ actor S3Client {
         // Ensure path starts with /
         urlComponents?.path = path.hasPrefix("/") ? path : "/" + path
         
-        // Sort query items for signing
         if !queryItems.isEmpty {
-            urlComponents?.queryItems = queryItems.sorted { $0.name < $1.name }
+            urlComponents?.queryItems = queryItems
         }
         
         guard let url = urlComponents?.url else {
@@ -169,74 +196,17 @@ actor S3Client {
         
         var request = HTTPClientRequest(url: url.absoluteString)
         request.method = HTTPMethod(rawValue: method)
-        
-        let timestamp = iso8601DateFormatter.string(from: Date())
-        let dateStamp = String(timestamp.prefix(8))
-        
-        var allHeaders = headers
-        allHeaders["Host"] = url.host ?? endpoint.host
-        allHeaders["x-amz-date"] = timestamp
-        allHeaders["x-amz-content-sha256"] = bodyHash
-        
-        if body != nil {
-            // Content-Type should be set by caller or defaulted, but we need to ensure it's signed if present
-            // If caller didn't set it, we don't force it here unless we know for sure?
-            // AWS S3 usually expects Content-Type for PUT
-        }
-        
-        // Construct canonical query string
-        let canonicalQueryString = urlComponents?.queryItems?
-            .map { item in
-                let encodedName = item.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? item.name
-                let encodedValue = item.value?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                return "\(encodedName)=\(encodedValue)"
-            }
-            .joined(separator: "&") ?? ""
-
-        // Canonical Path should be URL encoded
-        // But for S3 signing, it's tricky.
-        // For basic ASCII keys, it's the path.
-        // Let's assume path is already properly encoded or simple for now.
-        let canonicalPath = url.path.isEmpty ? "/" : url.path
-
-        let canonicalRequest = createCanonicalRequest(
-            method: method,
-            path: canonicalPath,
-            query: canonicalQueryString,
-            headers: allHeaders,
-            payloadHash: bodyHash
-        )
-        
-        let stringToSign = createStringToSign(
-            timestamp: timestamp,
-            region: region,
-            canonicalRequest: canonicalRequest
-        )
-        
-        let signatureKey = generateSignatureKey(
-            secretKey: secretKey,
-            dateStamp: dateStamp,
-            region: region,
-            service: "s3"
-        )
-        
-        let signature = HMAC<SHA256>.authenticationCode(
-            for: Data(stringToSign.utf8),
-            using: signatureKey
-        ).map { String(format: "%02hhx", $0) }.joined()
-        
-        let signedHeaders = allHeaders.keys.map { $0.lowercased() }.sorted().joined(separator: ";")
-        let authHeader = "AWS4-HMAC-SHA256 Credential=\(accessKey)/\(dateStamp)/\(region)/s3/aws4_request, SignedHeaders=\(signedHeaders), Signature=\(signature)"
-        
-        allHeaders["Authorization"] = authHeader
-        
-        for (key, value) in allHeaders {
-            request.headers.add(name: key, value: value)
-        }
-        
         if let body = body {
             request.body = body
         }
+        
+        signer.sign(
+            request: &request,
+            url: url,
+            method: method,
+            bodyHash: bodyHash,
+            headers: headers
+        )
         
         return request
     }
@@ -251,8 +221,7 @@ actor S3Client {
             throw S3Error.requestFailed("Status: \(response.status)")
         }
         
-        let body = try await response.body.collect(upTo: 10 * 1024 * 1024) // 10MB max for XML
-        
+        let body = try await response.body.collect(upTo: 10 * 1024 * 1024)
         let data = Data(buffer: body)
         let xml = try XMLDocument(data: data)
         
@@ -261,9 +230,7 @@ actor S3Client {
     }
     
     func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
-        guard bucket != nil else {
-            throw S3Error.bucketNotFound
-        }
+        guard bucket != nil else { throw S3Error.bucketNotFound }
         
         var objects: [S3Object] = []
         var isTruncated = true
@@ -280,12 +247,6 @@ actor S3Client {
                 queryItems.append(URLQueryItem(name: "delimiter", value: delimiter))
             }
             queryItems.append(URLQueryItem(name: "max-keys", value: String(batchSize)))
-            
-            // Handle V2 pagination (ContinuationToken)
-            // Note: S3 ListObjects V2 is generally preferred.
-            // But let's check if the previous implementation was V1 or V2?
-            // "GET /" without list-type=2 is V1.
-            // Let's switch to V2 for reliable pagination.
             queryItems.append(URLQueryItem(name: "list-type", value: "2"))
             
             if let token = continuationToken {
@@ -303,12 +264,10 @@ actor S3Client {
                 throw S3Error.requestFailed("Status: \(response.status)")
             }
             
-            let body = try await response.body.collect(upTo: 20 * 1024 * 1024) // 20MB buffer
+            let body = try await response.body.collect(upTo: 20 * 1024 * 1024)
             let data = Data(buffer: body)
             let xml = try XMLDocument(data: data)
             
-            // Parse objects
-            // V2 path: //ListBucketResult/Contents
             let objectNodes = try xml.nodes(forXPath: "//ListBucketResult/Contents")
             for node in objectNodes {
                 guard let key = (try? node.nodes(forXPath: "Key").first)?.stringValue,
@@ -326,11 +285,9 @@ actor S3Client {
                 ))
             }
             
-            // Parse prefixes (directories)
             let prefixNodes = try xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
             for node in prefixNodes {
                 guard let prefix = node.stringValue else { continue }
-                // Avoid duplicates if paginated and prefixes repeat (unlikely in V2 but valid)
                 if !objects.contains(where: { $0.key == prefix && $0.isDirectory }) {
                     objects.append(S3Object(
                         key: prefix,
@@ -341,35 +298,26 @@ actor S3Client {
                 }
             }
             
-            // Check truncation
             if let truncatedNode = try? xml.nodes(forXPath: "//ListBucketResult/IsTruncated").first,
                truncatedNode.stringValue?.lowercased() == "true" {
                 isTruncated = true
                 if let nextTokenNode = try? xml.nodes(forXPath: "//ListBucketResult/NextContinuationToken").first {
                     continuationToken = nextTokenNode.stringValue
                 } else {
-                    // Should not happen in V2 if truncated
                     isTruncated = false
                 }
             } else {
                 isTruncated = false
             }
         }
-        
         return objects
     }
     
-    // Enhanced getObject returning AsyncThrowingStream
     func getObjectStream(key: String) async throws -> AsyncThrowingStream<Data, Error> {
-        guard bucket != nil else {
-            throw S3Error.bucketNotFound
-        }
+        guard bucket != nil else { throw S3Error.bucketNotFound }
         
         let path = key.hasPrefix("/") ? key : "/" + key
-        let request = try await buildRequest(
-            method: "GET",
-            path: path
-        )
+        let request = try await buildRequest(method: "GET", path: path)
         
         let response = try await httpClient.execute(request, timeout: .seconds(30))
         guard response.status == HTTPResponseStatus.ok else {
@@ -394,49 +342,6 @@ actor S3Client {
         }
     }
     
-    // Legacy support for backward compatibility if needed, or convenience
-    func getObject(key: String) async throws -> Data {
-        var data = Data()
-        for try await chunk in try await getObjectStream(key: key) {
-            data.append(chunk)
-        }
-        return data
-    }
-    
-    // Streaming Put using URLs (Files)
-    func putObject(key: String, fileURL: URL, progress: (@Sendable (Int) -> Void)? = nil) async throws {
-        guard bucket != nil else { throw S3Error.bucketNotFound }
-        
-        let fileHandle = try FileHandle(forReadingFrom: fileURL)
-        let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
-        
-        // Calculate SHA256 of the file for signing?
-        // S3 requires x-amz-content-sha256 header.
-        // For streaming (UNSIGNED-PAYLOAD), we can use "UNSIGNED-PAYLOAD" as the hash value.
-        // This is safe for HTTPS.
-        
-        let path = key.hasPrefix("/") ? key : "/" + key
-        
-        // We use a stream body
-        // Note: AHC requires AsyncSequence of ByteBuffers.
-        
-        let asyncBytes = FileHandleAsyncSequence(fileHandle: fileHandle, chunkSize: 64 * 1024, progress: progress)
-        let body = HTTPClientRequest.Body.stream(asyncBytes, length: .known(Int64(fileSize)))
-        
-        let request = try await buildRequest(
-            method: "PUT",
-            path: path,
-            headers: ["Content-Type": "application/octet-stream"],
-            body: body,
-            bodyHash: "UNSIGNED-PAYLOAD" // Important for streaming without buffering entire file
-        )
-        
-        let response = try await httpClient.execute(request, timeout: .seconds(300)) // 5 minutes timeout for upload
-        guard response.status == HTTPResponseStatus.ok else {
-             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
-        }
-    }
-
     // Generic Streaming Put
     func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
         guard bucket != nil else { throw S3Error.bucketNotFound }
@@ -459,34 +364,11 @@ actor S3Client {
         }
     }
     
-    // Buffer Put for small data
-    func putObject(key: String, data: Data) async throws {
-        guard bucket != nil else { throw S3Error.bucketNotFound }
-        
-        let path = key.hasPrefix("/") ? key : "/" + key
-        
-        let bodyHash = data.sha256()
-        let body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
-        
-        let request = try await buildRequest(
-            method: "PUT",
-            path: path,
-            headers: ["Content-Type": "application/octet-stream"],
-            body: body,
-            bodyHash: bodyHash
-        )
-        
-        let response = try await httpClient.execute(request, timeout: .seconds(60))
-        guard response.status == HTTPResponseStatus.ok else {
-             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
-        }
-    }
-    
     func deleteObject(key: String) async throws {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         let path = key.hasPrefix("/") ? key : "/" + key
-        let request = try await buildRequest( method: "DELETE", path: path)
+        let request = try await buildRequest(method: "DELETE", path: path)
         
         let response = try await httpClient.execute(request, timeout: .seconds(30))
         guard response.status == HTTPResponseStatus.noContent else {
@@ -496,14 +378,26 @@ actor S3Client {
     
     func createBucket(name: String) async throws {
         // Location constraint
-        let xmlStr = """
-        <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-            <LocationConstraint>\(region)</LocationConstraint>
-        </CreateBucketConfiguration>
-        """
-        let data = Data(xmlStr.utf8)
-        let bodyHash = data.sha256()
-        let body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
+        // FIX: strict check for us-east-1 to avoid errors on AWS S3
+        let body: HTTPClientRequest.Body?
+        let bodyHash: String
+        let xmlStr: String?
+        
+        if region != "us-east-1" {
+            xmlStr = """
+            <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                <LocationConstraint>\(region)</LocationConstraint>
+            </CreateBucketConfiguration>
+            """
+            let data = Data(xmlStr!.utf8)
+            bodyHash = data.sha256()
+            body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
+        } else {
+             // For us-east-1, no body allowed for CreateBucket
+            xmlStr = nil
+            body = nil
+            bodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // Empty hash
+        }
         
         let request = try await buildRequest(
             method: "PUT",
@@ -515,7 +409,6 @@ actor S3Client {
         let response = try await httpClient.execute(request, timeout: .seconds(30))
         
         if response.status != HTTPResponseStatus.ok {
-             // Read body to see error
              let errBody = try? await response.body.collect(upTo: 1024 * 1024)
              let errStr = errBody.map { String(buffer: $0) } ?? ""
              throw S3Error.requestFailed("Failed to create bucket: \(response.status) \(errStr)")
@@ -572,10 +465,21 @@ extension Data {
         let hash = SHA256.hash(data: self)
         return hash.map { String(format: "%02hhx", $0) }.joined()
     }
+    var hexString: String {
+        return map { String(format: "%02hhx", $0) }.joined()
+    }
 }
 
+extension Digest {
+     var hexString: String {
+        return map { String(format: "%02hhx", $0) }.joined()
+     }
+}
 
-// Helper to convert FileHandle to AsyncSequence<ByteBuffer>
+extension String {
+     var data: Data { Data(utf8) }
+}
+
 struct FileHandleAsyncSequence: AsyncSequence, Sendable {
     typealias Element = ByteBuffer
     
@@ -589,8 +493,6 @@ struct FileHandleAsyncSequence: AsyncSequence, Sendable {
         let progress: (@Sendable (Int) -> Void)?
         
         mutating func next() async throws -> ByteBuffer? {
-            // Read data in background
-            // Use local capture to avoid capturing mutating self in Task
             let handle = fileHandle
             let size = chunkSize
             let callback = progress
