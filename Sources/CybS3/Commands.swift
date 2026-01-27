@@ -36,7 +36,7 @@ struct CybS3: AsyncParsableCommand {
         @Option(name: .shortAndLong, help: "Region")
         var region: String = "us-east-1"
         
-        @Flag(name: .shortAndLong, help: "Use SSL")
+        @Flag(name: .long, inversion: .prefixedNo, help: "Use SSL")
         var ssl: Bool = true
         
         @Flag(name: .shortAndLong, help: "Verbose output")
@@ -69,21 +69,21 @@ struct CybS3: AsyncParsableCommand {
             )
         }
         
-        private func loadConfig() throws -> Config {
+        private func loadConfig() throws -> AppConfig {
             let configPath = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".cybs3")
                 .appendingPathExtension("json")
             
             guard FileManager.default.fileExists(atPath: configPath.path) else {
-                return Config()
+                return AppConfig()
             }
             
             let data = try Data(contentsOf: configPath)
-            return try JSONDecoder().decode(Config.self, from: data)
+            return try JSONDecoder().decode(AppConfig.self, from: data)
         }
     }
     
-    struct Config: Codable {
+    struct AppConfig: Codable {
         var accessKey: String?
         var secretKey: String?
         var endpoint: String?
@@ -318,11 +318,11 @@ extension CybS3 {
                 .appendingPathComponent(".cybs3")
                 .appendingPathExtension("json")
             
-            var config = CybS3.Config()
+            var config = CybS3.AppConfig()
             
             if FileManager.default.fileExists(atPath: configPath.path) {
                 let data = try Data(contentsOf: configPath)
-                config = try JSONDecoder().decode(CybS3.Config.self, from: data)
+                config = try JSONDecoder().decode(CybS3.AppConfig.self, from: data)
             }
             
             if let accessKey = accessKey {

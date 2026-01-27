@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CybS3}",
+            "name": "Debug cybs3",
+            "target": "cybs3",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug cybs3"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:CybS3}",
+            "name": "Release cybs3",
+            "target": "cybs3",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release cybs3"
+        }
+    ]
+}

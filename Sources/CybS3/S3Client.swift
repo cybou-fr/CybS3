@@ -2,7 +2,15 @@ import Foundation
 import Crypto
 import AsyncHTTPClient
 import Logging
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 import NIOFoundationCompat
+import NIOHTTP1
+import NIO
 
 enum S3Error: Error {
     case invalidURL
@@ -139,7 +147,7 @@ actor S3Client {
         queryItems: [URLQueryItem] = [],
         headers: [String: String] = [:],
         body: Data? = nil
-    ) async throws -> (URLRequest, String) {
+    ) async throws -> (HTTPClient.Request, String) {
         guard let baseURL = endpoint.url else {
             throw S3Error.invalidURL
         }
@@ -203,13 +211,24 @@ actor S3Client {
         
         allHeaders["Authorization"] = authHeader
         
+        var nioHeaders = HTTPHeaders()
         for (key, value) in allHeaders {
-            request.setValue(value, forHTTPHeaderField: key)
+            nioHeaders.add(name: key, value: value)
         }
         
-        request.httpBody = body
+        var nioBody: HTTPClient.Body?
+        if let body = body {
+            nioBody = .bytes(body)
+        }
         
-        return (request, canonicalRequest)
+        let nioRequest = try HTTPClient.Request(
+            url: url.absoluteString,
+            method: HTTPMethod(rawValue: method),
+            headers: nioHeaders,
+            body: nioBody
+        )
+        
+        return (nioRequest, canonicalRequest)
     }
     
     // MARK: - Public API
@@ -217,7 +236,7 @@ actor S3Client {
     func listBuckets() async throws -> [String] {
         let (request, _) = try await buildRequest(method: "GET")
         
-        let response = try await httpClient.execute(request: request)
+        let response = try await httpClient.execute(request: request).get()
         guard let body = response.body else {
             throw S3Error.invalidResponse
         }
@@ -225,12 +244,12 @@ actor S3Client {
         let data = Data(buffer: body)
         let xml = try XMLDocument(data: data)
         
-        return xml.nodes(forXPath: "//ListAllMyBucketsResult/Buckets/Bucket/Name")
+        return try xml.nodes(forXPath: "//ListAllMyBucketsResult/Buckets/Bucket/Name")
             .compactMap { $0.stringValue }
     }
     
     func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
-        guard let bucket = bucket else {
+        guard bucket != nil else {
             throw S3Error.bucketNotFound
         }
         
@@ -248,7 +267,7 @@ actor S3Client {
             queryItems: queryItems
         )
         
-        let response = try await httpClient.execute(request: request)
+        let response = try await httpClient.execute(request: request).get()
         guard let body = response.body else {
             throw S3Error.invalidResponse
         }
@@ -259,11 +278,11 @@ actor S3Client {
         var objects: [S3Object] = []
         
         // Parse objects
-        let objectNodes = xml.nodes(forXPath: "//ListBucketResult/Contents")
+        let objectNodes = try xml.nodes(forXPath: "//ListBucketResult/Contents")
         for node in objectNodes {
-            guard let key = node.nodes(forXPath: "Key").first?.stringValue,
-                  let lastModified = node.nodes(forXPath: "LastModified").first?.stringValue,
-                  let sizeString = node.nodes(forXPath: "Size").first?.stringValue,
+            guard let key = (try? node.nodes(forXPath: "Key").first)?.stringValue,
+                  let lastModified = (try? node.nodes(forXPath: "LastModified").first)?.stringValue,
+                  let sizeString = (try? node.nodes(forXPath: "Size").first)?.stringValue,
                   let size = Int(sizeString) else {
                 continue
             }
@@ -277,7 +296,7 @@ actor S3Client {
         }
         
         // Parse prefixes (directories)
-        let prefixNodes = xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
+        let prefixNodes = try xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
         for node in prefixNodes {
             guard let prefix = node.stringValue else { continue }
             objects.append(S3Object(
@@ -301,8 +320,8 @@ actor S3Client {
             path: "/\(key)"
         )
         
-        let response = try await httpClient.execute(request: request)
-        guard response.status == .ok else {
+        let response = try await httpClient.execute(request: request).get()
+        guard response.status == HTTPResponseStatus.ok else {
             throw S3Error.objectNotFound
         }
         
@@ -324,8 +343,8 @@ actor S3Client {
             body: data
         )
         
-        let response = try await httpClient.execute(request: request)
-        guard response.status == .ok else {
+        let response = try await httpClient.execute(request: request).get()
+        guard response.status == HTTPResponseStatus.ok else {
             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
         }
     }
@@ -340,15 +359,13 @@ actor S3Client {
             path: "/\(key)"
         )
         
-        let response = try await httpClient.execute(request: request)
-        guard response.status == .noContent else {
+        let response = try await httpClient.execute(request: request).get()
+        guard response.status == HTTPResponseStatus.noContent else {
             throw S3Error.requestFailed("Failed to delete object: \(response.status)")
         }
     }
     
     func createBucket(name: String) async throws {
-        var bucketRequest = bucket
-        bucketRequest = nil // Temporarily clear bucket for bucket-level operation
         
         let body = """
         <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -362,8 +379,8 @@ actor S3Client {
             body: body
         )
         
-        let response = try await httpClient.execute(request: request)
-        guard response.status == .ok else {
+        let response = try await httpClient.execute(request: request).get()
+        guard response.status == HTTPResponseStatus.ok else {
             throw S3Error.requestFailed("Failed to create bucket: \(response.status)")
         }
     }
@@ -407,11 +424,11 @@ struct S3Object: CustomStringConvertible {
 
 // MARK: - Extensions
 
-private let iso8601DateFormatter: ISO8601DateFormatter = {
+private var iso8601DateFormatter: ISO8601DateFormatter {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     return formatter
-}()
+}
 
 extension Data {
     func sha256() -> String {
