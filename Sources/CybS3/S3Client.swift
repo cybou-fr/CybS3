@@ -14,22 +14,38 @@ import FoundationXML
 #endif
 
 // Re-export S3Object and S3Error for Commands.swift
+
+/// Errors that can occur during S3 operations.
 enum S3Error: Error {
+    /// The provided URL or endpoint was invalid.
     case invalidURL
+    /// Authentication with S3 failed (e.g., invalid keys).
     case authenticationFailed
+    /// The request failed with a specific error message.
     case requestFailed(String)
+    /// The response from S3 was invalid or could not be parsed.
     case invalidResponse
+    /// The specified bucket was not found.
     case bucketNotFound
+    /// The specified object was not found.
     case objectNotFound
+    /// Access to the local file system failed.
     case fileAccessFailed
 }
 
+/// Represents an S3 endpoint configuration.
 struct S3Endpoint {
+    /// The hostname of the S3 service (e.g., `s3.amazonaws.com`).
     let host: String
+    /// The port number (usually 443 for HTTPS or 80 for HTTP).
     let port: Int
+    /// Whether to use SSL/HTTPS.
     let useSSL: Bool
     
+    /// Returns "https" or "http" based on `useSSL`.
     var scheme: String { useSSL ? "https" : "http" }
+    
+    /// Constructs a full URL from the endpoint components.
     var url: URL? {
         var components = URLComponents()
         components.scheme = scheme
@@ -41,12 +57,22 @@ struct S3Endpoint {
 
 // MARK: - AWS V4 Signer
 
+/// Helper struct to generate AWS Signature Version 4 headers.
 struct AWSV4Signer {
     let accessKey: String
     let secretKey: String
     let region: String
     let service: String = "s3"
     
+    /// Signs an HTTP request according to AWS V4 signature requirements.
+    ///
+    /// - Parameters:
+    ///   - request: The HTTPClientRequest to modify with signature headers.
+    ///   - url: The full URL of the request.
+    ///   - method: The HTTP method (GET, PUT, etc.).
+    ///   - bodyHash: The SHA256 hash of the request body (hex string). Use "UNSIGNED-PAYLOAD" if payload signing is skipped.
+    ///   - headers: Additional headers to include in the signature.
+    ///   - now: The timestamp to use for signing (defaults to current Date).
     func sign(
         request: inout HTTPClientRequest,
         url: URL,
@@ -137,6 +163,10 @@ struct AWSV4Signer {
 
 // MARK: - S3 Client
 
+// MARK: - S3 Client
+
+/// An actor that manages S3 interactions such as listing buckets, objects, and uploading/downloading files.
+/// It uses `AsyncHTTPClient` for networking and `AWSV4Signer` for authentication.
 actor S3Client {
     private let endpoint: S3Endpoint
     private let bucket: String?
@@ -145,6 +175,14 @@ actor S3Client {
     private let signer: AWSV4Signer
     private let logger: Logger
     
+    /// Initializes a new S3Client.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The S3 endpoint configuration (host, port, ssl).
+    ///   - accessKey: AWS Access Key ID.
+    ///   - secretKey: AWS Secret Access Key.
+    ///   - bucket: Optional bucket name to use as context for operations.
+    ///   - region: AWS Region (default "us-east-1").
     init(
         endpoint: S3Endpoint,
         accessKey: String,
@@ -166,6 +204,7 @@ actor S3Client {
     
     // MARK: - Request Building
     
+    /// Builds and signs an HTTPClientRequest for S3.
     private func buildRequest(
         method: String,
         path: String = "/",
@@ -213,6 +252,8 @@ actor S3Client {
     
     // MARK: - Public API
     
+    /// Lists all buckets owned by the authenticated sender.
+    /// - Returns: An array of bucket names.
     func listBuckets() async throws -> [String] {
         let request = try await buildRequest(method: "GET")
         
@@ -229,6 +270,12 @@ actor S3Client {
             .compactMap { $0.stringValue }
     }
     
+    /// Lists objects in the current bucket.
+    ///
+    /// - Parameters:
+    ///   - prefix: Limits the response to keys that begin with the specified prefix.
+    ///   - delimiter: A delimiter is a character you use to group keys.
+    /// - Returns: An array of `S3Object`s.
     func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
@@ -313,6 +360,10 @@ actor S3Client {
         return objects
     }
     
+    /// Returns an asynchronous stream of data for the specified object.
+    ///
+    /// - Parameter key: The object key.
+    /// - Returns: An `AsyncThrowingStream` supplying the object's data in chunks.
     func getObjectStream(key: String) async throws -> AsyncThrowingStream<Data, Error> {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
@@ -342,7 +393,12 @@ actor S3Client {
         }
     }
     
-    // Generic Streaming Put
+    /// Uploads an object using a streaming body.
+    ///
+    /// - Parameters:
+    ///   - key: The key to assign to the object.
+    ///   - stream: An AsyncSequence of ByteBuffers providing the data.
+    ///   - length: The total length of the upload (required for S3).
     func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
@@ -364,6 +420,7 @@ actor S3Client {
         }
     }
     
+    /// Deletes the specified object from the bucket.
     func deleteObject(key: String) async throws {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
@@ -376,6 +433,7 @@ actor S3Client {
         }
     }
     
+    /// Creates a new bucket using the current region.
     func createBucket(name: String) async throws {
         // Location constraint
         // FIX: strict check for us-east-1 to avoid errors on AWS S3
@@ -418,10 +476,18 @@ actor S3Client {
 
 // MARK: - Models
 
+/// Represents an object stored in S3 or a directory prefix.
 struct S3Object: CustomStringConvertible, Equatable, Hashable {
+    /// The key (path) of the object.
     let key: String
+    
+    /// The size of the object in bytes.
     let size: Int
+    
+    /// The last modified date of the object.
     let lastModified: Date
+    
+    /// Indicates if this object represents a directory (common prefix) in a delimited list.
     let isDirectory: Bool
     
     var description: String {
@@ -461,22 +527,27 @@ private var iso8601DateFormatter: ISO8601DateFormatter {
 }
 
 extension Data {
+    /// Computes the SHA256 hash of the data and returns it as a hex string.
     func sha256() -> String {
         let hash = SHA256.hash(data: self)
         return hash.map { String(format: "%02hhx", $0) }.joined()
     }
+    
+    /// Returns the data as a hex string.
     var hexString: String {
         return map { String(format: "%02hhx", $0) }.joined()
     }
 }
 
 extension Digest {
+    /// Returns the digest as a hex string.
      var hexString: String {
         return map { String(format: "%02hhx", $0) }.joined()
      }
 }
 
 extension String {
+    /// Returns the string as UTF-8 data.
      var data: Data { Data(utf8) }
 }
 

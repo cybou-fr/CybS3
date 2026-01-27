@@ -17,6 +17,7 @@ extension CybS3 {
 }
 
 extension CybS3.Keys {
+    /// Command to generate a new 12-word mnemonic phrase.
     struct Create: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "create",
@@ -37,6 +38,7 @@ extension CybS3.Keys {
         }
     }
     
+    /// Command to validate a mnemonic phrase.
     struct Validate: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "validate",
@@ -66,6 +68,7 @@ extension CybS3.Keys {
         }
     }
     
+    /// Command to rotate the Master Key (Mnemonic) while maintaining access to encrypted data.
     struct Rotate: AsyncParsableCommand {
          static let configuration = CommandConfiguration(
              commandName: "rotate",

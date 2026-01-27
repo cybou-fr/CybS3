@@ -33,6 +33,7 @@ extension CybS3 {
 }
 
 extension CybS3.Vaults {
+    /// Command to add a new encrypted vault configuration.
     struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "add",
@@ -74,6 +75,7 @@ extension CybS3.Vaults {
         }
     }
     
+    /// Command to list all configured vaults.
     struct List: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "list",
@@ -101,6 +103,7 @@ extension CybS3.Vaults {
         }
     }
     
+    /// Command to delete a configured vault.
     struct Delete: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "delete",
@@ -125,6 +128,7 @@ extension CybS3.Vaults {
         }
     }
 
+    /// Command to select a vault and apply its settings globally.
     struct Select: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "select",

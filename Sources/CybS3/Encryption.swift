@@ -10,8 +10,13 @@ enum EncryptionError: Error {
 
 struct Encryption {
     /// Derives a 256-bit SymmetricKey from the mnemonic phrase.
-    /// We use the seed from BIP39 (512 bits usually, or 256 bits depending on BIP39 impl).
-    /// BIP39.seed() returns Data. We can use HKDF to derive a specific AES-GCM key from that seed.
+    ///
+    /// The derivation process is as follows:
+    /// 1. Uses PBKDF2-HMAC-SHA512 on the mnemonic (joined by spaces) with salt "mnemonic" and 2048 rounds to generate a seed.
+    /// 2. Uses HKDF-SHA256 to derive a 32-byte (256-bit) key from that seed, using a specific "cybs3-vault" salt.
+    ///
+    /// - Parameter mnemonic: The 12-word mnemonic phrase.
+    /// - Returns: A `SymmetricKey` suitable for AES-GCM.
     static func deriveKey(mnemonic: [String]) throws -> SymmetricKey {
         // Use PBKDF2-HMAC-SHA512 (Standard BIP39)
         // 2048 rounds
@@ -115,6 +120,11 @@ struct Encryption {
         return derived.prefix(byteCount)
     }
     
+    /// Encrypts data using AES-GCM.
+    /// - Parameters:
+    ///   - data: The plaintext data.
+    ///   - key: The 256-bit symmetric key.
+    /// - Returns: The combined seal (Nonce + Ciphertext + Tag).
     static func encrypt(data: Data, key: SymmetricKey) throws -> Data {
         // AES.GCM
         // We use a random Nonce
@@ -122,6 +132,11 @@ struct Encryption {
         return sealedBox.combined! // Returns nonce + ciphertext + tag
     }
     
+    /// Decrypts data using AES-GCM.
+    /// - Parameters:
+    ///   - data: The combined seal (Nonce + Ciphertext + Tag).
+    ///   - key: The 256-bit symmetric key.
+    /// - Returns: The plaintext data.
     static func decrypt(data: Data, key: SymmetricKey) throws -> Data {
         let sealedBox = try AES.GCM.SealedBox(combined: data)
         return try AES.GCM.open(sealedBox, using: key)

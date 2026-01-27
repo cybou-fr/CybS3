@@ -6,6 +6,9 @@ import NIO
 import Crypto
 
 @main
+/// The main entry point for the CybS3 Command Line Interface.
+///
+/// CybS3 provides an S3-compatible object storage browser with client-side encryption capabilities.
 struct CybS3: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "cybs3",
@@ -25,6 +28,7 @@ struct CybS3: AsyncParsableCommand {
         defaultSubcommand: Ls.self
     )
     
+    /// Global options available to all subcommands.
     struct GlobalOptions: ParsableArguments {
         @Option(name: .shortAndLong, help: "S3 endpoint URL")
         var endpoint: String?
@@ -47,8 +51,16 @@ struct CybS3: AsyncParsableCommand {
         @Flag(name: .shortAndLong, help: "Verbose output")
         var verbose: Bool = false
         
-        /// Creates a client and returns the CONFIGURATION (which contains the Datakey)
-        /// This forces the user to unlock the config (Mnemonic) for most operations.
+        /// Creates a configured `S3Client`, resolving settings from CLI args, Environment variables, and the persisted Configuration.
+        ///
+        /// This method performs the following steps:
+        /// 1. Prompts for the Master Key (Mnemonic) to unlock the encrypted configuration.
+        /// 2. Loads the encrypted configuration and derives the Data Key.
+        /// 3. Resolves S3 settings (Endpoint, Credentials, Region) with the hierarchy: CLI Args > Env Vars > Config.
+        /// 4. Initializes and returns the `S3Client`, the Data Key (for encryption), and the full Config object.
+        ///
+        /// - Throws: `ExitCode.failure` if the URL is invalid or other setup errors occur.
+        /// - Returns: A tuple containing the `S3Client`, the Symmetric `DataKey`, and the `EncryptedConfig`.
         func createClient() throws -> (S3Client, SymmetricKey, EncryptedConfig) {
             
             // 1. Prompt for Mnemonic to unlock Storage
@@ -116,6 +128,7 @@ struct CybS3: AsyncParsableCommand {
 // MARK: - List Command
 
 extension CybS3 {
+    /// Command to list all buckets.
     struct List: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "list",
@@ -139,6 +152,9 @@ extension CybS3 {
 // MARK: - Get Command
 
 extension CybS3 {
+    /// Command to download an object from S3.
+    ///
+    /// The object is automatically decrypted using the Data Key derived from the user's Mnemonic.
     struct Get: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "get",
@@ -195,6 +211,9 @@ extension CybS3 {
 // MARK: - Put Command
 
 extension CybS3 {
+    /// Command to upload a file to S3.
+    ///
+    /// The file is automatically encrypted client-side using the Data Key before being streamed to S3.
     struct Put: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "put",
@@ -250,6 +269,7 @@ extension CybS3 {
 // MARK: - Delete Command
 
 extension CybS3 {
+    /// Command to delete an object from S3.
     struct Delete: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "delete",
@@ -272,6 +292,7 @@ extension CybS3 {
 // MARK: - Make Bucket Command
 
 extension CybS3 {
+    /// Command to create a new bucket.
     struct Mb: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "mb",
@@ -315,6 +336,9 @@ extension CybS3 {
 
 extension CybS3 {
     struct Ls: AsyncParsableCommand {
+        // MARK: - List Objects Command (default)
+        /// List objects in the configured bucket.
+        /// This is the default command if none is specified.
         static let configuration = CommandConfiguration(
             commandName: "ls",
             abstract: "List objects in a bucket",
@@ -341,10 +365,11 @@ extension CybS3 {
 // MARK: - Config Command
 
 extension CybS3 {
+    /// Command to update the local configuration (default region, bucket, keys, etc.).
     struct Config: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "config",
-            abstract: "Configure CybS3"
+            abstract: "Configure CybS3 settings"
         )
         
         @Option(name: .shortAndLong, help: "Set access key")

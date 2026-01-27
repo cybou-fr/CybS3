@@ -28,10 +28,16 @@ struct StreamingEncryption {
     
     // Wrapper for SymmetricKey to allow Sendable conformance
     // SymmetricKey is a value type wrapping SecureBytes.
+    /// A wrapper for `SymmetricKey` to allow Sendable conformance.
+    /// `SymmetricKey` internally wraps `SecureBytes` but is not marked Sendable in all versions.
     struct SendableKey: @unchecked Sendable {
         let key: SymmetricKey
     }
     
+    /// An AsyncSequence that encrypts an upstream file stream in chunks.
+    ///
+    /// Each chunk yielded by the upstream `FileHandleAsyncSequence` is encrypted as a separate AES-GCM block.
+    /// This allows for streaming uploads where the total size might be large, but we only keep one chunk in memory.
     struct EncryptedStream: AsyncSequence, Sendable {
         typealias Element = Data
         
@@ -67,14 +73,11 @@ struct StreamingEncryption {
         }
     }
     
-    // Decrypts a stream of Data (chunks)
-    // IMPORTANT: The upstream must yield chunks that exactly match the encrypted block boundaries.
-    // If S3 or HTTP client alters chunk sizes (e.g. buffering), this naive implementation will fail
-    // unless the buffer logic below handles re-assembly correctly.
-    //
-    // The AsyncIterator below attempts to buffer incoming data until it has at least one full block
-    // (except for the last block).
-    
+    /// An AsyncSequence that decrypts a stream of encrypted Data chunks.
+    ///
+    /// - Important: The upstream must yield chunks that align with the encrypted block boundaries.
+    ///   Since S3 or HTTP clients might buffer data differently, this stream implements buffering logic
+    ///   to ensure it always processes complete encrypted blocks (chunkSize + 28 bytes).
     struct DecryptedStream: AsyncSequence, Sendable {
         typealias Element = Data
         
