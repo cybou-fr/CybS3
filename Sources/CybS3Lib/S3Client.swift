@@ -538,7 +538,7 @@ public struct S3Object: CustomStringConvertible, Equatable, Hashable, Sendable {
 
 private var iso8601DateFormatter: ISO8601DateFormatter {
     let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
+    formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withTimeZone]
     return formatter
 }
 

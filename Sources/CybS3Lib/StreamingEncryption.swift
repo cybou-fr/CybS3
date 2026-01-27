@@ -1,5 +1,6 @@
 import Foundation
 import Crypto
+import NIO
 
 public enum StreamingEncryptionError: Error {
     case encryptionFailed

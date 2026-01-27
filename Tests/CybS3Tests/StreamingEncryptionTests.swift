@@ -20,7 +20,7 @@ final class StreamingEncryptionTests: XCTestCase {
             mutating func next() async throws -> ByteBuffer? {
                 guard offset < data.count else { return nil }
                 
-                let end = min(offset + chunkSize, data.count)
+                let end = Swift.min(offset + chunkSize, data.count)
                 let chunkData = data[offset..<end]
                 offset = end
                 
