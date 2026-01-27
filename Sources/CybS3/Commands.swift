@@ -159,7 +159,7 @@ extension CybS3 {
             
             // Validate mnemonic
             do {
-                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic)
+                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic, language: .english)
             } catch {
                 print("Error: Invalid mnemonic: \(error)")
                 throw ExitCode.failure
@@ -176,7 +176,7 @@ extension CybS3 {
             print("Downloading and Decrypting \(key) to \(outputPath)...")
             var totalBytes = 0
             
-            let fileDecryptionKey = Encryption.deriveKey(mnemonic: mnemonic)
+            let fileDecryptionKey = try Encryption.deriveKey(mnemonic: mnemonic)
             
             // Get raw encrypted stream
             let encryptedStream = try await client.getObjectStream(key: key)
@@ -243,7 +243,7 @@ extension CybS3 {
             
             // Validate mnemonic
             do {
-                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic)
+                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic, language: .english)
             } catch {
                 print("Error: Invalid mnemonic: \(error)")
                 throw ExitCode.failure
@@ -254,7 +254,7 @@ extension CybS3 {
             
             print("Encrypting and Uploading \(file) to \(objectKey)...")
             
-            let fileEncryptionKey = Encryption.deriveKey(mnemonic: mnemonic)
+            let fileEncryptionKey = try Encryption.deriveKey(mnemonic: mnemonic)
             
             // 2. Prepare Encryption Stream
             let fileHandle = try FileHandle(forReadingFrom: fileURL)

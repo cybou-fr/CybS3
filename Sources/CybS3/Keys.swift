@@ -24,7 +24,7 @@ extension CybS3.Keys {
         
         func run() async throws {
             do {
-                let mnemonic = try BIP39.generateMnemonic()
+                let mnemonic = try BIP39.generateMnemonic(wordCount: .twelve, language: .english)
                 print("Your new mnemonic phrase (KEEP THIS SAFE!):")
                 print("------------------------------------------------")
                 print(mnemonic.joined(separator: " "))
@@ -47,7 +47,7 @@ extension CybS3.Keys {
         
         func run() async throws {
             do {
-                try BIP39.validate(mnemonic: words)
+                try BIP39.validate(mnemonic: words, language: .english)
                 print("✅ Mnemonic is valid.")
             } catch BIP39.Error.invalidWordCount {
                 print("❌ Invalid word count. Expected 12 words.")

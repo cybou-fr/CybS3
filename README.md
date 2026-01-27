@@ -100,7 +100,7 @@ cybs3 delete my-file.txt
 ```
 
 ## Security Details
-- **Key Derivation**: Keys are derived from your BIP39 mnemonic using HKDF-SHA256.
+- **Key Derivation**: Keys are derived from your BIP39 mnemonic using standard PBKDF2-HMAC-SHA512 (2048 rounds), followed by HKDF for specific sub-keys. This ensures stability and compatibility with standard BIP39 seeds.
 - **Vault Encryption**: Vault configurations are stored in `~/.cybs3.vaults` encrypted with AES-GCM.
 - **File Encryption**: Files are encrypted using streaming AES-GCM with 1MB chunk size, generating a unique nonce for each chunk.
 

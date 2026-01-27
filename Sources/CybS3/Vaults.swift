@@ -80,7 +80,7 @@ extension CybS3.Vaults {
             let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             
             do {
-                try BIP39.validate(mnemonic: mnemonic)
+                try BIP39.validate(mnemonic: mnemonic, language: .english)
             } catch {
                 print("Error: Invalid mnemonic: \(error)")
                 throw ExitCode.failure
@@ -237,7 +237,7 @@ private func loadVaults(mnemonic: [String]) throws -> [VaultConfig] {
     }
     
     let encryptedData = try Data(contentsOf: file)
-    let key = Encryption.deriveKey(mnemonic: mnemonic)
+    let key = try Encryption.deriveKey(mnemonic: mnemonic)
     
     do {
         let decryptedData = try Encryption.decrypt(data: encryptedData, key: key)
@@ -254,7 +254,7 @@ private func saveVaults(_ vaults: [VaultConfig], mnemonic: [String]) throws {
     let secureVaults = SecureVaults(vaults: vaults)
     let data = try JSONEncoder().encode(secureVaults)
     
-    let key = Encryption.deriveKey(mnemonic: mnemonic)
+    let key = try Encryption.deriveKey(mnemonic: mnemonic)
     let encryptedData = try Encryption.encrypt(data: data, key: key)
     
     if !FileManager.default.fileExists(atPath: file.path) {
