@@ -401,6 +401,35 @@ public actor S3Client {
             }
         }
     }
+
+    /// Gets the size of an object in bytes.
+    ///
+    /// - Parameter key: The object key.
+    /// - Returns: The size in bytes, or nil if not found/determined.
+    public func getObjectSize(key: String) async throws -> Int? {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        let request = try await buildRequest(method: "HEAD", path: path)
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        
+        // Drain body if any (HEAD shouldn't have one but good practice)
+        _ = try await response.body.collect(upTo: 1)
+        
+        guard response.status == HTTPResponseStatus.ok else {
+            if response.status == HTTPResponseStatus.notFound {
+                return nil
+            }
+            throw S3Error.requestFailed("Status: \(response.status)")
+        }
+        
+        if let contentLength = response.headers.first(name: "Content-Length"),
+           let size = Int(contentLength) {
+            return size
+        }
+        return nil
+    }
     
     /// Uploads an object using a streaming body.
     ///
