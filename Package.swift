@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto", from: "3.5.0"),
         .package(url: "https://github.com/swift-server/async-http-client", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.5.0"),
+        .package(url: "https://github.com/cybou-fr/SwiftBIP39.git", branch: "main"),
     ],
     targets: [
         .executableTarget(
@@ -25,6 +26,7 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Logging", package: "swift-log"),
+                "SwiftBIP39",
             ]
         ),
     ]

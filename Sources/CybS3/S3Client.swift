@@ -436,6 +436,28 @@ actor S3Client {
              throw S3Error.requestFailed("Failed to upload object: \(response.status)")
         }
     }
+
+    // Generic Streaming Put
+    func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        
+        let body = HTTPClientRequest.Body.stream(stream, length: .known(length))
+        
+        let request = try await buildRequest(
+            method: "PUT",
+            path: path,
+            headers: ["Content-Type": "application/octet-stream"],
+            body: body,
+            bodyHash: "UNSIGNED-PAYLOAD"
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(300))
+        guard response.status == HTTPResponseStatus.ok else {
+             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
+        }
+    }
     
     // Buffer Put for small data
     func putObject(key: String, data: Data) async throws {

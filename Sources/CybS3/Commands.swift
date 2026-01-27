@@ -1,6 +1,9 @@
 import Foundation
 import ArgumentParser
+import ArgumentParser
 import AsyncHTTPClient
+import SwiftBIP39
+import NIO
 
 @main
 struct CybS3: AsyncParsableCommand {
@@ -15,7 +18,9 @@ struct CybS3: AsyncParsableCommand {
             Mb.self,
             Rb.self,
             Ls.self,
-            Config.self
+            Config.self,
+            Keys.self,
+            Vaults.self
         ],
         defaultSubcommand: Ls.self
     )
@@ -127,7 +132,7 @@ extension CybS3 {
     struct Get: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "get",
-            abstract: "Download an object from S3"
+            abstract: "Download an object from S3 (Decrypted by default)"
         )
         
         @OptionGroup var options: GlobalOptions
@@ -144,6 +149,22 @@ extension CybS3 {
                 throw ExitCode.failure
             }
             
+            // 1. Prompt for mnemonic to transparently decrypt
+            print("Enter your 12-word Mnemonic to decrypt this file:")
+            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
+                print("Error: Mnemonic required for decryption.")
+                throw ExitCode.failure
+            }
+            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            
+            // Validate mnemonic
+            do {
+                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic)
+            } catch {
+                print("Error: Invalid mnemonic: \(error)")
+                throw ExitCode.failure
+            }
+            
             let client = try options.createClient()
             let outputPath = output ?? FileManager.default.currentDirectoryPath + "/" + (key as NSString).lastPathComponent
             let outputURL = URL(fileURLWithPath: outputPath)
@@ -152,15 +173,21 @@ extension CybS3 {
             _ = FileManager.default.createFile(atPath: outputPath, contents: nil)
             let fileHandle = try FileHandle(forWritingTo: outputURL)
             
-            print("Downloading \(key) to \(outputPath)...")
+            print("Downloading and Decrypting \(key) to \(outputPath)...")
             var totalBytes = 0
             
-            let stream = try await client.getObjectStream(key: key)
+            let fileDecryptionKey = Encryption.deriveKey(mnemonic: mnemonic)
             
-            for try await chunk in stream {
+            // Get raw encrypted stream
+            let encryptedStream = try await client.getObjectStream(key: key)
+            
+            // Decrypt stream
+            let decryptedStream = StreamingEncryption.DecryptedStream(upstream: encryptedStream, key: fileDecryptionKey)
+            
+            for try await chunk in decryptedStream {
                 totalBytes += chunk.count
                 let mb = Double(totalBytes) / 1024 / 1024
-                print(String(format: "\rDownloaded: %.2f MB", mb), terminator: "")
+                print(String(format: "\rDecrypted: %.2f MB", mb), terminator: "")
                 
                 if #available(macOS 10.15.4, *) {
                     try fileHandle.seekToEnd()
@@ -171,7 +198,7 @@ extension CybS3 {
             }
             
             try fileHandle.close()
-            print("\nDownload Complete.")
+            print("\nDownload Complete (Decrypted).")
         }
     }
 }
@@ -182,7 +209,7 @@ extension CybS3 {
     struct Put: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "put",
-            abstract: "Upload a file to S3"
+            abstract: "Upload a file to S3 (Encrypted by default)"
         )
         
         @OptionGroup var options: GlobalOptions
@@ -206,31 +233,61 @@ extension CybS3 {
                 throw ExitCode.failure
             }
             
-            let objectKey = key ?? fileURL.lastPathComponent
+            // 1. Prompt for mnemonic to transparently encrypt
+            print("Enter your 12-word Mnemonic to encrypt this file:")
+            guard let mnemonicStr = readLine(), !mnemonicStr.isEmpty else {
+                print("Error: Mnemonic required for encryption.")
+                throw ExitCode.failure
+            }
+            let mnemonic = mnemonicStr.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             
+            // Validate mnemonic
+            do {
+                try SwiftBIP39.BIP39.validate(mnemonic: mnemonic)
+            } catch {
+                print("Error: Invalid mnemonic: \(error)")
+                throw ExitCode.failure
+            }
+            
+            let objectKey = key ?? fileURL.lastPathComponent
             let client = try options.createClient()
             
-            print("Uploading \(file) to \(objectKey)...")
+            print("Encrypting and Uploading \(file) to \(objectKey)...")
             
-            // Shared state for progress
-            final class Progress: @unchecked Sendable {
-                var bytes = 0
-                let lock = NSLock()
-                func add(_ n: Int) -> Double {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    bytes += n
-                    return Double(bytes) / 1024 / 1024
-                }
+            let fileEncryptionKey = Encryption.deriveKey(mnemonic: mnemonic)
+            
+            // 2. Prepare Encryption Stream
+            let fileHandle = try FileHandle(forReadingFrom: fileURL)
+            let fileSize = try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 ?? 0
+            
+            let fileStream = FileHandleAsyncSequence(fileHandle: fileHandle, chunkSize: StreamingEncryption.chunkSize, progress: nil) // 1MB chunks
+            // My StreamingEncryption.EncryptedStream was written to take `FileHandleAsyncSequence` as upstream.
+            // Let's check StreamingEncryption.swift again.
+            // It expects `FileHandleAsyncSequence`.
+            // AND `FileHandleAsyncSequence` in S3Client yields `ByteBuffer`.
+            // `EncryptedStream` implementation I wrote: `let data = Data(buffer: chunk)`
+            // So it converts ByteBuffer to Data.
+            // Then it yields `Data`.
+            
+            // We need to convert `Data` back to `ByteBuffer` for `S3Client.putObject`.
+            
+            let encryptedStream = StreamingEncryption.EncryptedStream(upstream: fileStream, key: fileEncryptionKey)
+            
+            // Map Data -> ByteBuffer for upload
+            let uploadStream = encryptedStream.map { ByteBuffer(data: $0) }
+            
+            // Calculate total encrypted size
+            // Overhead per chunk (1MB) = 28 bytes.
+            let fullChunks = fileSize / Int64(StreamingEncryption.chunkSize)
+            let remainingBytes = fileSize % Int64(StreamingEncryption.chunkSize)
+            var totalEncryptedSize = fullChunks * Int64(StreamingEncryption.chunkSize + 28)
+            if remainingBytes > 0 {
+                totalEncryptedSize += (remainingBytes + 28)
             }
-            let progress = Progress()
             
-            try await client.putObject(key: objectKey, fileURL: fileURL) { bytes in
-                let mb = progress.add(bytes)
-                print(String(format: "\rUploaded: %.2f MB", mb), terminator: "")
-            }
+            try await client.putObject(key: objectKey, stream: uploadStream, length: totalEncryptedSize)
             
-            print("\nUpload Complete.")
+            print("\nUpload Complete (Encrypted).")
         }
     }
 }
