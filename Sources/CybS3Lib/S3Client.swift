@@ -559,7 +559,7 @@ public struct S3Object: CustomStringConvertible, Equatable, Hashable, Sendable {
             unitIndex += 1
         }
         
-        return String(format: "%.1f %s", size, units[unitIndex])
+        return String(format: "%.1f %@", size, units[unitIndex])
     }
 }
 

@@ -271,10 +271,20 @@ public struct InteractionService {
         try BIP39.validate(mnemonic: mnemonic, language: .english)
         return mnemonic
     }
+    
+    /// Prompts the user to enter a bucket name.
+    public static func promptForBucket() throws -> String {
+        print("Enter bucket name:")
+        guard let bucket = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), !bucket.isEmpty else {
+            throw InteractionError.bucketRequired
+        }
+        return bucket
+    }
 }
 
 public enum InteractionError: Error {
     case mnemonicRequired
+    case bucketRequired
 }
 
 // MARK: - Encryption Service

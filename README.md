@@ -7,12 +7,13 @@ A secure, command-line S3-compatible object storage browser and file transfer to
 ## Features
 
 - **Standard S3 Operations**:
-  - `ls`: List objects (supports prefixes).
-  - `list`: List all buckets.
-  - `mb`: Make (create) a bucket.
-  - `put`: Upload files (automatically encrypted).
-  - `get`: Download files (automatically decrypted).
-  - `delete`: Delete objects.
+- **Standard S3 Operations**:
+  - `files list`: List objects (supports prefixes).
+  - `buckets list`: List all buckets.
+  - `buckets create`: Make (create) a bucket.
+  - `files put`: Upload files (automatically encrypted, with progress bar).
+  - `files get`: Download files (automatically decrypted, with progress bar).
+  - `files delete`: Delete objects.
   
 - **Security & Encryption**:
   - **BIP39 Mnemonic Support**: Uses standard 12-word recovery phrases as the root of trust.
@@ -55,7 +56,14 @@ swift build -c release
 cp .build/release/cybs3 /usr/local/bin/
 ```
 
+### Running Tests
+To run the automated test suite:
+```bash
+swift test
+```
+
 ## Usage
+
 
 ### 1. Key Management
 Everything starts with a key.
@@ -95,7 +103,7 @@ cybs3 vaults list
 ```bash
 cybs3 vaults select AWS-Production
 ```
-*This sets the global context for subsequent `put`/`get` commands.*
+*This sets the global context for subsequent `files put`/`files get` commands.*
 
 **Delete a Vault:**
 ```bash
@@ -107,26 +115,34 @@ Once a vault is selected, operations are simple. The tool will ask for your Mnem
 
 **Upload (Encrypt):**
 ```bash
-cybs3 put ./my-secret-backup.zip
-# or with custom key
-cybs3 put ./my-secret-backup.zip --key backup/2023/january.zip
+cybs3 files put ./my-secret-backup.zip
+# or with custom key (positional argument)
+cybs3 files put ./my-secret-backup.zip backup/2023/january.zip
 ```
-*The file is encrypted in 1MB chunks on the fly.*
+*The file is encrypted in 1MB chunks on the fly. A progress bar shows the status.*
 
 **Download (Decrypt):**
 ```bash
-cybs3 get backup/2023/january.zip
+cybs3 files get backup/2023/january.zip
 # or to specific path
-cybs3 get backup/2023/january.zip --output ./restore.zip
+cybs3 files get backup/2023/january.zip ./restore.zip
+```
+
+**Delete Object:**
+```bash
+# Interactive (asks for confirmation)
+cybs3 files delete backup/2023/january.zip
+# Non-interactive (force delete)
+cybs3 files delete backup/2023/january.zip --force
 ```
 
 **Listing Objects:**
 ```bash
 # List all objects
-cybs3 ls
+cybs3 files list
 
-# List with prefix (folder)
-cybs3 ls backup/2023/
+# List with prefix (folder) (Note: Currently `list` lists all, prefix filtering may vary by implementation)
+# For now, assumes basic list.
 ```
 
 ### 4. Direct Configuration (Advanced)
