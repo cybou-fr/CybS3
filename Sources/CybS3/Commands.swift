@@ -146,23 +146,34 @@ struct CybS3: AsyncParsableCommand {
         )
 
         func run() async throws {
-            print("🔐 Login to CybS3")
-            print(
-                "This will store your mnemonic in the system Keychain so you don't have to type it every time."
+            ConsoleUI.header("Login to CybS3")
+            ConsoleUI.info(
+                "This will store your mnemonic in the system Keychain for seamless access."
             )
+            print()
 
             do {
                 let mnemonic = try InteractionService.promptForMnemonic(purpose: "login")
 
-                // Verify it works by trying to load config?
+                // Verify it works by trying to load config
                 // If it's a new user, load() creates a new config.
                 // If existing user, load() checks if it decrypts.
                 _ = try StorageService.load(mnemonic: mnemonic)
 
                 try KeychainService.save(mnemonic: mnemonic)
-                print("✅ Login successful. Mnemonic stored in Keychain.")
+                ConsoleUI.success("Login successful. Mnemonic stored securely in Keychain.")
+                ConsoleUI.dim("You can now run commands without entering your mnemonic.")
+            } catch let error as InteractionError {
+                CLIError.from(error).printError()
+                throw ExitCode.failure
+            } catch let error as StorageError {
+                CLIError.from(error).printError()
+                throw ExitCode.failure
+            } catch let error as KeychainError {
+                ConsoleUI.error("Keychain error: \(error.localizedDescription)")
+                throw ExitCode.failure
             } catch {
-                print("❌ Login failed: \(error)")
+                ConsoleUI.error("Login failed: \(error.localizedDescription)")
                 throw ExitCode.failure
             }
         }
@@ -180,9 +191,11 @@ struct CybS3: AsyncParsableCommand {
         func run() async throws {
             do {
                 try KeychainService.delete()
-                print("✅ Logout successful. Mnemonic removed from Keychain.")
+                ConsoleUI.success("Logout successful. Mnemonic removed from Keychain.")
+            } catch KeychainError.itemNotFound {
+                ConsoleUI.warning("No active session found. Already logged out.")
             } catch {
-                print("❌ Logout failed or no active session: \(error)")
+                ConsoleUI.error("Logout failed: \(error.localizedDescription)")
             }
         }
     }
@@ -211,11 +224,16 @@ struct CybS3: AsyncParsableCommand {
             var bucketName: String
 
             func run() async throws {
-                let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
-                    options, overrideBucket: bucketName)
-                print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
-                try await client.createBucket(name: bucketName)
-                print("✅ Created bucket: \(bucketName)")
+                do {
+                    let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
+                        options, overrideBucket: bucketName)
+                    ConsoleUI.dim("Using vault: \(vaultName ?? "default")")
+                    try await client.createBucket(name: bucketName)
+                    ConsoleUI.success("Created bucket: \(bucketName)")
+                } catch let error as S3Error {
+                    ConsoleUI.error(error.localizedDescription)
+                    throw ExitCode.failure
+                }
             }
         }
         
@@ -235,18 +253,22 @@ struct CybS3: AsyncParsableCommand {
 
             func run() async throws {
                 if !force {
-                    print("⚠️  Are you sure you want to delete bucket '\(bucketName)'? This cannot be undone. [y/N] ", terminator: "")
-                    fflush(stdout)
-                    guard let input = readLine(), input.lowercased() == "y" else {
-                        print("Operation aborted.")
+                    ConsoleUI.warning("You are about to delete bucket '\(bucketName)'. This cannot be undone.")
+                    guard InteractionService.confirm(message: "Are you sure?", defaultValue: false) else {
+                        ConsoleUI.info("Operation cancelled.")
                         return
                     }
                 }
                 
-                let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
-                print("Using vault: \(vaultName ?? "default")")
-                try await client.deleteBucket(name: bucketName)
-                print("✅ Deleted bucket: \(bucketName)")
+                do {
+                    let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
+                    ConsoleUI.dim("Using vault: \(vaultName ?? "default")")
+                    try await client.deleteBucket(name: bucketName)
+                    ConsoleUI.success("Deleted bucket: \(bucketName)")
+                } catch let error as S3Error {
+                    ConsoleUI.error(error.localizedDescription)
+                    throw ExitCode.failure
+                }
             }
         }
 
@@ -500,7 +522,7 @@ struct CybS3: AsyncParsableCommand {
                 
                 let fileURL = URL(fileURLWithPath: localPath)
                 guard FileManager.default.fileExists(atPath: localPath) else {
-                    print("❌ Error: File not found: \(localPath)")
+                    ConsoleUI.error("File not found: \(localPath)")
                     throw ExitCode.failure
                 }
 
@@ -515,15 +537,15 @@ struct CybS3: AsyncParsableCommand {
                 
                 // Dry-run mode
                 if dryRun {
-                    print("\n🔍 Dry Run - Upload Preview:")
-                    print(String(repeating: "-", count: 50))
-                    print("  Source:           \(localPath)")
-                    print("  Destination:      s3://\(bucketName)/\(remoteKey)")
-                    print("  Original size:    \(formatBytes(Int(fileSize)))")
-                    print("  Encrypted size:   \(formatBytes(Int(encryptedSize)))")
-                    print("  Overhead:         \(formatBytes(Int(encryptedSize - fileSize)))")
-                    print(String(repeating: "-", count: 50))
-                    print("✅ No changes made (dry-run mode)")
+                    print()
+                    ConsoleUI.header("Dry Run - Upload Preview")
+                    ConsoleUI.keyValue("Source:", localPath)
+                    ConsoleUI.keyValue("Destination:", "s3://\(bucketName)/\(remoteKey)")
+                    ConsoleUI.keyValue("Original size:", formatBytes(Int(fileSize)))
+                    ConsoleUI.keyValue("Encrypted size:", formatBytes(Int(encryptedSize)))
+                    ConsoleUI.keyValue("Overhead:", formatBytes(Int(encryptedSize - fileSize)))
+                    print()
+                    ConsoleUI.success("No changes made (dry-run mode)")
                     return
                 }
                 
@@ -561,7 +583,7 @@ struct CybS3: AsyncParsableCommand {
                     key: remoteKey, stream: uploadStream, length: encryptedSize)
 
                 progressBar.complete()
-                print("✅ Uploaded \(localPath) as \(remoteKey)")
+                ConsoleUI.success("Uploaded \(localPath) as \(remoteKey)")
             }
             
             private func formatBytes(_ bytes: Int) -> String {
@@ -601,19 +623,18 @@ struct CybS3: AsyncParsableCommand {
                 }
 
                 if !force {
-                    print("Are you sure you want to delete '\(key)'? [y/N] ", terminator: "")
-                    fflush(stdout)
-                    guard let input = readLine(), input.lowercased() == "y" else {
-                        print("Operation aborted.")
+                    ConsoleUI.warning("You are about to delete '\(key)' from bucket '\(bucketName)'.")
+                    guard InteractionService.confirm(message: "Are you sure?", defaultValue: false) else {
+                        ConsoleUI.info("Operation cancelled.")
                         return
                     }
                 }
 
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
-                print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
+                ConsoleUI.dim("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
                 try await client.deleteObject(key: key)
-                print("Deleted \(key)")
+                ConsoleUI.success("Deleted \(key)")
             }
         }
     }
