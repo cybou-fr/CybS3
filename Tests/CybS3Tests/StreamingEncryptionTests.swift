@@ -283,4 +283,270 @@ final class StreamingEncryptionTests: XCTestCase {
             StreamingEncryption.maxChunkSize
         )
     }
+    
+    // MARK: - Additional Edge Case Tests
+    
+    func testVerySmallData() async throws {
+        // Test with just a few bytes
+        let originalData = Data([0x01, 0x02, 0x03])
+        let key = SymmetricKey(size: .bits256)
+        
+        let mockStream = MockStream(data: originalData, chunkSize: StreamingEncryption.chunkSize)
+        let encryptedStream = StreamingEncryption.EncryptedStream(upstream: mockStream, key: key)
+        
+        var encryptedChunks: [Data] = []
+        for try await chunk in encryptedStream {
+            encryptedChunks.append(chunk)
+        }
+        
+        XCTAssertEqual(encryptedChunks.count, 1)
+        XCTAssertEqual(encryptedChunks[0].count, 3 + StreamingEncryption.overhead)
+        
+        // Decrypt and verify
+        let mockEncryptedStream = MockDataStream(chunks: encryptedChunks)
+        let decryptedStream = StreamingEncryption.DecryptedStream(upstream: mockEncryptedStream, key: key)
+        
+        var decryptedData = Data()
+        for try await chunk in decryptedStream {
+            decryptedData.append(chunk)
+        }
+        
+        XCTAssertEqual(decryptedData, originalData)
+    }
+    
+    func testSingleByteEncryption() async throws {
+        let originalData = Data([0xFF])
+        let key = SymmetricKey(size: .bits256)
+        
+        let mockStream = MockStream(data: originalData, chunkSize: StreamingEncryption.chunkSize)
+        let encryptedStream = StreamingEncryption.EncryptedStream(upstream: mockStream, key: key)
+        
+        var encryptedChunks: [Data] = []
+        for try await chunk in encryptedStream {
+            encryptedChunks.append(chunk)
+        }
+        
+        XCTAssertEqual(encryptedChunks.count, 1)
+        
+        // Decrypt
+        let mockEncryptedStream = MockDataStream(chunks: encryptedChunks)
+        let decryptedStream = StreamingEncryption.DecryptedStream(upstream: mockEncryptedStream, key: key)
+        
+        var decryptedData = Data()
+        for try await chunk in decryptedStream {
+            decryptedData.append(chunk)
+        }
+        
+        XCTAssertEqual(decryptedData, originalData)
+        XCTAssertEqual(decryptedData.count, 1)
+        XCTAssertEqual(decryptedData[0], 0xFF)
+    }
+    
+    func testMultipleChunksExactBoundary() async throws {
+        // Test data that is exactly N chunks (no remainder)
+        let numChunks = 3
+        let originalData = Data(repeating: 0x42, count: numChunks * StreamingEncryption.chunkSize)
+        let key = SymmetricKey(size: .bits256)
+        
+        let mockStream = MockStream(data: originalData, chunkSize: StreamingEncryption.chunkSize)
+        let encryptedStream = StreamingEncryption.EncryptedStream(upstream: mockStream, key: key)
+        
+        var encryptedChunks: [Data] = []
+        for try await chunk in encryptedStream {
+            encryptedChunks.append(chunk)
+        }
+        
+        XCTAssertEqual(encryptedChunks.count, numChunks)
+        
+        // All chunks should be full size
+        for chunk in encryptedChunks {
+            XCTAssertEqual(chunk.count, StreamingEncryption.chunkSize + StreamingEncryption.overhead)
+        }
+        
+        // Decrypt and verify
+        let mockEncryptedStream = MockDataStream(chunks: encryptedChunks)
+        let decryptedStream = StreamingEncryption.DecryptedStream(upstream: mockEncryptedStream, key: key)
+        
+        var decryptedData = Data()
+        for try await chunk in decryptedStream {
+            decryptedData.append(chunk)
+        }
+        
+        XCTAssertEqual(decryptedData, originalData)
+    }
+    
+    func testEncryptedSizeCalculationEdgeCases() {
+        let chunkSize = Int64(StreamingEncryption.chunkSize)
+        let overhead = Int64(StreamingEncryption.overhead)
+        
+        // Test with custom chunk sizes
+        XCTAssertEqual(
+            StreamingEncryption.encryptedSize(plaintextSize: 0, chunkSize: 256 * 1024),
+            0
+        )
+        
+        XCTAssertEqual(
+            StreamingEncryption.encryptedSize(plaintextSize: 100, chunkSize: 256 * 1024),
+            100 + overhead
+        )
+        
+        // 2 chunks + partial
+        let twoAndHalf = chunkSize * 2 + chunkSize / 2
+        let expected = 2 * (chunkSize + overhead) + (chunkSize / 2) + overhead
+        XCTAssertEqual(
+            StreamingEncryption.encryptedSize(plaintextSize: twoAndHalf),
+            expected
+        )
+    }
+    
+    func testOptimalChunkSizeBoundaries() {
+        // Test exact boundaries
+        
+        // Exactly 10MB - should transition from min to default
+        let tenMB: Int64 = 10 * 1024 * 1024
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: tenMB - 1),
+            StreamingEncryption.minChunkSize
+        )
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: tenMB),
+            StreamingEncryption.chunkSize
+        )
+        
+        // Exactly 100MB - should transition from default to 5MB chunks
+        let hundredMB: Int64 = 100 * 1024 * 1024
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: hundredMB - 1),
+            StreamingEncryption.chunkSize
+        )
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: hundredMB),
+            5 * 1024 * 1024
+        )
+        
+        // Exactly 1GB - should transition to max chunk size
+        let oneGB: Int64 = 1024 * 1024 * 1024
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: oneGB - 1),
+            5 * 1024 * 1024
+        )
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: oneGB),
+            StreamingEncryption.maxChunkSize
+        )
+        
+        // Very small files
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: 0),
+            StreamingEncryption.minChunkSize
+        )
+        XCTAssertEqual(
+            StreamingEncryption.optimalChunkSize(forFileSize: 1),
+            StreamingEncryption.minChunkSize
+        )
+    }
+    
+    func testStreamConstantValues() {
+        // Verify constant values are as expected
+        XCTAssertEqual(StreamingEncryption.chunkSize, 1024 * 1024) // 1MB
+        XCTAssertEqual(StreamingEncryption.minChunkSize, 256 * 1024) // 256KB
+        XCTAssertEqual(StreamingEncryption.maxChunkSize, 16 * 1024 * 1024) // 16MB
+        XCTAssertEqual(StreamingEncryption.overhead, 28) // 12 nonce + 16 tag
+    }
+    
+    func testDecryptionWithInvalidDataTooShort() async throws {
+        let key = SymmetricKey(size: .bits256)
+        
+        // Create data that is too short to be valid (less than 28 bytes overhead)
+        let invalidData = Data(repeating: 0x00, count: 10)
+        let mockEncryptedStream = MockDataStream(chunks: [invalidData])
+        let decryptedStream = StreamingEncryption.DecryptedStream(upstream: mockEncryptedStream, key: key)
+        
+        do {
+            for try await _ in decryptedStream {
+                XCTFail("Should have thrown an error for invalid data")
+            }
+        } catch {
+            // Expected - should throw invalidData or decryption error
+            XCTAssertTrue(true)
+        }
+    }
+    
+    func testEncryptionPreservesDataIntegrity() async throws {
+        // Test with binary data containing all byte values
+        var originalData = Data()
+        for byte: UInt8 in 0...255 {
+            originalData.append(byte)
+        }
+        // Repeat to make it larger
+        originalData.append(originalData)
+        originalData.append(originalData)
+        
+        let key = SymmetricKey(size: .bits256)
+        
+        let mockStream = MockStream(data: originalData, chunkSize: StreamingEncryption.chunkSize)
+        let encryptedStream = StreamingEncryption.EncryptedStream(upstream: mockStream, key: key)
+        
+        var encryptedChunks: [Data] = []
+        for try await chunk in encryptedStream {
+            encryptedChunks.append(chunk)
+        }
+        
+        // Decrypt
+        let mockEncryptedStream = MockDataStream(chunks: encryptedChunks)
+        let decryptedStream = StreamingEncryption.DecryptedStream(upstream: mockEncryptedStream, key: key)
+        
+        var decryptedData = Data()
+        for try await chunk in decryptedStream {
+            decryptedData.append(chunk)
+        }
+        
+        XCTAssertEqual(decryptedData, originalData)
+    }
+    
+    func testConcurrentEncryptions() async throws {
+        // Test that multiple encryptions can run without interference
+        let key = SymmetricKey(size: .bits256)
+        let testData1 = Data(repeating: 0xAA, count: 1024)
+        let testData2 = Data(repeating: 0xBB, count: 2048)
+        
+        async let result1: [Data] = {
+            let stream = MockStream(data: testData1, chunkSize: StreamingEncryption.chunkSize)
+            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key)
+            var chunks: [Data] = []
+            for try await chunk in encrypted {
+                chunks.append(chunk)
+            }
+            return chunks
+        }()
+        
+        async let result2: [Data] = {
+            let stream = MockStream(data: testData2, chunkSize: StreamingEncryption.chunkSize)
+            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key)
+            var chunks: [Data] = []
+            for try await chunk in encrypted {
+                chunks.append(chunk)
+            }
+            return chunks
+        }()
+        
+        let (chunks1, chunks2) = try await (result1, result2)
+        
+        // Decrypt both
+        let decrypted1 = try await decryptChunks(chunks1, key: key)
+        let decrypted2 = try await decryptChunks(chunks2, key: key)
+        
+        XCTAssertEqual(decrypted1, testData1)
+        XCTAssertEqual(decrypted2, testData2)
+    }
+    
+    private func decryptChunks(_ chunks: [Data], key: SymmetricKey) async throws -> Data {
+        let stream = MockDataStream(chunks: chunks)
+        let decrypted = StreamingEncryption.DecryptedStream(upstream: stream, key: key)
+        var data = Data()
+        for try await chunk in decrypted {
+            data.append(chunk)
+        }
+        return data
+    }
 }

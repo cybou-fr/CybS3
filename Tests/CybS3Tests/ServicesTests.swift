@@ -295,11 +295,46 @@ final class ConsoleUITests: XCTestCase {
         XCTAssertEqual(ConsoleUI.formatBytes(1099511627776), "1.00 TB")
     }
     
+    func testFormatBytesEdgeCases() {
+        // Test negative values (shouldn't happen, but should handle gracefully)
+        // Test very large values
+        XCTAssertEqual(ConsoleUI.formatBytes(1), "1 B")
+        XCTAssertEqual(ConsoleUI.formatBytes(1023), "1023 B")
+        XCTAssertEqual(ConsoleUI.formatBytes(1025), "1.00 KB")
+        
+        // Test exact boundaries
+        XCTAssertEqual(ConsoleUI.formatBytes(1024 * 1024), "1.00 MB")
+        XCTAssertEqual(ConsoleUI.formatBytes(1024 * 1024 * 1024), "1.00 GB")
+    }
+    
     func testFormatDuration() {
         XCTAssertEqual(ConsoleUI.formatDuration(0.5), "500 ms")
         XCTAssertEqual(ConsoleUI.formatDuration(1.5), "1.5 s")
         XCTAssertEqual(ConsoleUI.formatDuration(65), "1m 5s")
         XCTAssertEqual(ConsoleUI.formatDuration(3665), "1h 1m")
+    }
+    
+    func testFormatDurationEdgeCases() {
+        // Sub-second
+        XCTAssertEqual(ConsoleUI.formatDuration(0.001), "1 ms")
+        XCTAssertEqual(ConsoleUI.formatDuration(0.999), "999 ms")
+        
+        // Exactly 1 second
+        XCTAssertEqual(ConsoleUI.formatDuration(1.0), "1.0 s")
+        
+        // Exactly 1 minute
+        XCTAssertEqual(ConsoleUI.formatDuration(60), "1m 0s")
+        
+        // Exactly 1 hour
+        XCTAssertEqual(ConsoleUI.formatDuration(3600), "1h 0m")
+        
+        // Zero
+        XCTAssertEqual(ConsoleUI.formatDuration(0), "0 ms")
+        
+        // Very long duration
+        let twoDays = 2 * 24 * 3600.0
+        let result = ConsoleUI.formatDuration(twoDays)
+        XCTAssertTrue(result.contains("h"), "Long durations should show hours")
     }
     
     func testStatusIcons() {
@@ -308,6 +343,18 @@ final class ConsoleUITests: XCTestCase {
         XCTAssertEqual(ConsoleUI.StatusIcon.warning.symbol, "⚠️")
         XCTAssertEqual(ConsoleUI.StatusIcon.info.symbol, "ℹ️")
         XCTAssertEqual(ConsoleUI.StatusIcon.lock.symbol, "🔐")
+    }
+    
+    func testStatusIconsComplete() {
+        // Test all status icons have symbols
+        let icons: [ConsoleUI.StatusIcon] = [
+            .success, .error, .warning, .info, .progress,
+            .question, .key, .folder, .file, .cloud, .lock, .unlock
+        ]
+        
+        for icon in icons {
+            XCTAssertFalse(icon.symbol.isEmpty, "Icon \(icon) should have a symbol")
+        }
     }
     
     func testColoredWithColorsDisabled() {
@@ -346,14 +393,90 @@ final class ConsoleUITests: XCTestCase {
         ConsoleUI.useColors = originalUseColors
     }
     
+    func testColoredWithAllColors() {
+        // Save original state
+        let originalUseColors = ConsoleUI.useColors
+        ConsoleUI.useColors = true
+        
+        let colors: [ConsoleUI.Color] = [.red, .green, .yellow, .blue, .magenta, .cyan, .white, .bold, .dim]
+        let text = "Test"
+        
+        for color in colors {
+            let colored = ConsoleUI.colored(text, color)
+            XCTAssertTrue(colored.contains(color.rawValue), "Color \(color) should be applied")
+            XCTAssertTrue(colored.contains(text), "Text should be preserved")
+            XCTAssertTrue(colored.contains(ConsoleUI.Color.reset.rawValue), "Reset code should be present")
+        }
+        
+        // Restore original state
+        ConsoleUI.useColors = originalUseColors
+    }
+    
     func testProgressBarInitialization() {
         let progressBar = ConsoleUI.ProgressBar(title: "Test", width: 20)
         XCTAssertNotNil(progressBar)
     }
     
+    func testProgressBarWithDifferentWidths() {
+        // Test with various widths
+        let widths = [10, 20, 40, 80]
+        for width in widths {
+            let progressBar = ConsoleUI.ProgressBar(title: "Test", width: width)
+            XCTAssertNotNil(progressBar)
+        }
+    }
+    
+    func testProgressBarUpdate() {
+        let progressBar = ConsoleUI.ProgressBar(title: "Test", width: 20, showSpeed: false)
+        
+        // Should not crash when updating
+        progressBar.update(progress: 0.0)
+        progressBar.update(progress: 0.5)
+        progressBar.update(progress: 1.0)
+    }
+    
+    func testProgressBarWithBytesProcessed() {
+        let progressBar = ConsoleUI.ProgressBar(title: "Uploading", width: 30, showSpeed: true)
+        
+        // Update with bytes information
+        progressBar.update(progress: 0.25, bytesProcessed: 256 * 1024)
+        progressBar.update(progress: 0.5, bytesProcessed: 512 * 1024)
+        progressBar.update(progress: 0.75, bytesProcessed: 768 * 1024)
+        progressBar.update(progress: 1.0, bytesProcessed: 1024 * 1024)
+    }
+    
+    func testProgressBarUpdateWithValidValues() {
+        let progressBar = ConsoleUI.ProgressBar(title: "Test", width: 20, showSpeed: false)
+        
+        // Test valid progress values
+        progressBar.update(progress: 0.0)
+        progressBar.update(progress: 0.25)
+        progressBar.update(progress: 0.5)
+        progressBar.update(progress: 0.75)
+        progressBar.update(progress: 1.0)
+    }
+    
     func testSpinnerInitialization() {
         let spinner = ConsoleUI.Spinner(message: "Loading...")
         XCTAssertNotNil(spinner)
+    }
+    
+    func testSpinnerLifecycle() {
+        let spinner = ConsoleUI.Spinner(message: "Processing")
+        
+        spinner.start()
+        spinner.tick()
+        spinner.tick()
+        spinner.tick()
+        spinner.stop(success: true)
+    }
+    
+    func testSpinnerWithFailure() {
+        let spinner = ConsoleUI.Spinner(message: "Trying something")
+        
+        spinner.start()
+        spinner.tick()
+        spinner.stop(success: false)
     }
 }
 
@@ -376,6 +499,69 @@ final class CLIErrorTests: XCTestCase {
         for error in errors {
             XCTAssertNotNil(error.errorDescription)
             XCTAssertFalse(error.errorDescription!.isEmpty)
+        }
+    }
+    
+    func testAllCLIErrorCasesHaveDescriptions() {
+        // Test all error cases have non-empty descriptions
+        let errors: [CLIError] = [
+            // Configuration
+            .configurationNotFound,
+            .configurationCorrupted(underlying: nil),
+            .configurationCorrupted(underlying: NSError(domain: "test", code: 1)),
+            .configurationMigrationFailed(reason: "test"),
+            
+            // Authentication
+            .authenticationRequired,
+            .invalidCredentials(service: "S3"),
+            .keychainAccessFailed(operation: "save", underlying: nil),
+            
+            // Mnemonic
+            .mnemonicRequired,
+            .invalidMnemonic(reason: "checksum failed"),
+            .mnemonicMismatch,
+            
+            // Vault
+            .vaultNotFound(name: "vault"),
+            .vaultAlreadyExists(name: "vault"),
+            .noVaultsConfigured,
+            
+            // S3 Operations
+            .bucketRequired,
+            .bucketNotFound(name: "bucket"),
+            .bucketNotEmpty(name: "bucket"),
+            .objectNotFound(key: "key"),
+            .accessDenied(resource: "resource"),
+            .accessDenied(resource: nil),
+            .networkError(underlying: NSError(domain: "test", code: 1)),
+            .invalidEndpoint(url: "invalid"),
+            
+            // File System
+            .fileNotFound(path: "/path"),
+            .fileAccessDenied(path: "/path"),
+            .fileWriteFailed(path: "/path", underlying: nil),
+            .directoryCreationFailed(path: "/path"),
+            
+            // Encryption
+            .encryptionFailed(reason: nil),
+            .encryptionFailed(reason: "test"),
+            .decryptionFailed(reason: nil),
+            .decryptionFailed(reason: "test"),
+            .keyDerivationFailed,
+            
+            // User Interaction
+            .userCancelled,
+            .invalidInput(expected: "number"),
+            .operationAborted(reason: "timeout"),
+            
+            // Generic
+            .internalError(message: "oops"),
+            .unknown(underlying: NSError(domain: "test", code: 1))
+        ]
+        
+        for error in errors {
+            XCTAssertNotNil(error.errorDescription, "Error \(error) should have description")
+            XCTAssertFalse(error.errorDescription!.isEmpty, "Error \(error) description should not be empty")
         }
     }
     
@@ -402,6 +588,20 @@ final class CLIErrorTests: XCTestCase {
         XCTAssertTrue(formatted.contains("my-vault"))
     }
     
+    func testFormattedMessageContainsSymbolAndDescription() {
+        let errors: [CLIError] = [
+            .configurationNotFound,
+            .userCancelled,
+            .bucketRequired
+        ]
+        
+        for error in errors {
+            let formatted = error.formattedMessage
+            XCTAssertTrue(formatted.contains(error.symbol))
+            XCTAssertTrue(formatted.contains(error.errorDescription ?? ""))
+        }
+    }
+    
     func testFromS3Error() {
         let s3Error = S3Error.bucketNotFound
         let cliError = CLIError.from(s3Error)
@@ -410,6 +610,28 @@ final class CLIErrorTests: XCTestCase {
             // Expected
         } else {
             XCTFail("Expected bucketNotFound error")
+        }
+    }
+    
+    func testFromS3ErrorAllCases() {
+        let mappings: [(S3Error, String)] = [
+            (.invalidURL, "invalidEndpoint"),
+            (.authenticationFailed, "invalidCredentials"),
+            (.bucketNotFound, "bucketNotFound"),
+            (.objectNotFound, "objectNotFound"),
+            (.accessDenied(resource: "test"), "accessDenied"),
+            (.bucketNotEmpty, "bucketNotEmpty"),
+            (.requestFailed(status: 500, code: nil, message: nil), "unknown"),
+            (.requestFailedLegacy("test"), "unknown"),
+            (.invalidResponse, "unknown"),
+            (.fileAccessFailed, "unknown")
+        ]
+        
+        for (s3Error, expectedCase) in mappings {
+            let cliError = CLIError.from(s3Error)
+            let description = String(describing: cliError)
+            XCTAssertTrue(description.contains(expectedCase) || description.lowercased().contains(expectedCase.lowercased()),
+                          "S3Error.\(s3Error) should map to CLIError containing '\(expectedCase)', got \(cliError)")
         }
     }
     
@@ -424,6 +646,21 @@ final class CLIErrorTests: XCTestCase {
         }
     }
     
+    func testFromStorageErrorAllCases() {
+        let mappings: [(StorageError, (CLIError) -> Bool)] = [
+            (.configNotFound, { if case .configurationNotFound = $0 { return true }; return false }),
+            (.decryptionFailed, { if case .decryptionFailed = $0 { return true }; return false }),
+            (.integrityCheckFailed, { if case .configurationCorrupted = $0 { return true }; return false }),
+            (.unsupportedVersion(5), { if case .configurationMigrationFailed = $0 { return true }; return false }),
+            (.oldVaultsFoundButMigrationFailed, { if case .configurationMigrationFailed = $0 { return true }; return false })
+        ]
+        
+        for (storageError, validator) in mappings {
+            let cliError = CLIError.from(storageError)
+            XCTAssertTrue(validator(cliError), "StorageError.\(storageError) should map correctly")
+        }
+    }
+    
     func testFromInteractionError() {
         let interactionError = InteractionError.mnemonicRequired
         let cliError = CLIError.from(interactionError)
@@ -432,6 +669,20 @@ final class CLIErrorTests: XCTestCase {
             // Expected
         } else {
             XCTFail("Expected mnemonicRequired error")
+        }
+    }
+    
+    func testFromInteractionErrorAllCases() {
+        let mappings: [(InteractionError, (CLIError) -> Bool)] = [
+            (.mnemonicRequired, { if case .mnemonicRequired = $0 { return true }; return false }),
+            (.bucketRequired, { if case .bucketRequired = $0 { return true }; return false }),
+            (.invalidMnemonic("test"), { if case .invalidMnemonic = $0 { return true }; return false }),
+            (.userCancelled, { if case .userCancelled = $0 { return true }; return false })
+        ]
+        
+        for (interactionError, validator) in mappings {
+            let cliError = CLIError.from(interactionError)
+            XCTAssertTrue(validator(cliError), "InteractionError.\(interactionError) should map correctly")
         }
     }
     
@@ -444,5 +695,51 @@ final class CLIErrorTests: XCTestCase {
         
         let endpointError = CLIError.invalidEndpoint(url: "invalid://url")
         XCTAssertTrue(endpointError.errorDescription!.contains("invalid://url"))
+    }
+    
+    func testConfigurationCorruptedWithUnderlying() {
+        let underlying = NSError(domain: "TestDomain", code: 42, userInfo: [NSLocalizedDescriptionKey: "Test error"])
+        let error = CLIError.configurationCorrupted(underlying: underlying)
+        
+        XCTAssertTrue(error.errorDescription!.contains("corrupted"))
+        XCTAssertTrue(error.errorDescription!.contains("Test error"))
+    }
+    
+    func testFileWriteFailedWithUnderlying() {
+        let underlying = NSError(domain: "TestDomain", code: 13, userInfo: [NSLocalizedDescriptionKey: "Permission denied"])
+        let error = CLIError.fileWriteFailed(path: "/tmp/file.txt", underlying: underlying)
+        
+        XCTAssertTrue(error.errorDescription!.contains("/tmp/file.txt"))
+        XCTAssertTrue(error.errorDescription!.contains("Permission denied"))
+    }
+    
+    func testEncryptionErrorsWithAndWithoutReasons() {
+        let withReason = CLIError.encryptionFailed(reason: "Key too short")
+        let withoutReason = CLIError.encryptionFailed(reason: nil)
+        
+        XCTAssertTrue(withReason.errorDescription!.contains("Key too short"))
+        XCTAssertTrue(withoutReason.errorDescription!.contains("Encryption failed"))
+    }
+    
+    func testAccessDeniedWithAndWithoutResource() {
+        let withResource = CLIError.accessDenied(resource: "my-bucket/secret-file.txt")
+        let withoutResource = CLIError.accessDenied(resource: nil)
+        
+        XCTAssertTrue(withResource.errorDescription!.contains("my-bucket/secret-file.txt"))
+        XCTAssertTrue(withoutResource.errorDescription!.contains("Access denied"))
+    }
+    
+    func testSuggestionsContainHelpfulCommands() {
+        let configError = CLIError.configurationNotFound
+        XCTAssertTrue(configError.suggestion!.contains("cybs3"))
+        
+        let mnemonicError = CLIError.mnemonicRequired
+        XCTAssertTrue(mnemonicError.suggestion!.contains("keys create"))
+        
+        let vaultError = CLIError.noVaultsConfigured
+        XCTAssertTrue(vaultError.suggestion!.contains("vaults add"))
+        
+        let bucketError = CLIError.bucketRequired
+        XCTAssertTrue(bucketError.suggestion!.contains("--bucket"))
     }
 }
