@@ -287,6 +287,7 @@ public actor S3Client {
     ///   - bucket: Optional bucket name to use as context for operations.
     ///   - region: AWS Region (default "us-east-1").
     ///   - configuration: Client configuration options.
+    /// - Precondition: accessKey and secretKey must not be empty for authenticated operations.
     public init(
         endpoint: S3Endpoint,
         accessKey: String,
@@ -295,9 +296,13 @@ public actor S3Client {
         region: String = "us-east-1",
         configuration: Configuration = .default
     ) {
+        // Validate inputs
+        precondition(!endpoint.host.isEmpty, "S3 endpoint host cannot be empty")
+        precondition(endpoint.port > 0 && endpoint.port <= 65535, "S3 endpoint port must be valid (1-65535)")
+        
         self.endpoint = endpoint
-        self.bucket = bucket
-        self.region = region
+        self.bucket = bucket?.isEmpty == true ? nil : bucket  // Normalize empty string to nil
+        self.region = region.isEmpty ? "us-east-1" : region
         
         // Configure HTTP client with connection pooling
         var httpConfig = HTTPClient.Configuration()
@@ -450,11 +455,14 @@ public actor S3Client {
                     continue
                 }
                 
+                let etag = (try? node.nodes(forXPath: "ETag").first)?.stringValue
+                
                 objects.append(S3Object(
                     key: key,
                     size: size,
                     lastModified: iso8601DateFormatter.date(from: lastModified) ?? Date(),
-                    isDirectory: false
+                    isDirectory: false,
+                    etag: etag
                 ))
             }
             
@@ -466,7 +474,8 @@ public actor S3Client {
                         key: prefix,
                         size: 0,
                         lastModified: Date(),
-                        isDirectory: true
+                        isDirectory: true,
+                        etag: nil
                     ))
                 }
             }
@@ -560,8 +569,11 @@ public actor S3Client {
     ///   - key: The key to assign to the object.
     ///   - stream: An AsyncSequence of ByteBuffers providing the data.
     ///   - length: The total length of the upload (required for S3).
+    /// - Throws: `S3Error` if the upload fails.
+    /// - Note: Uses a 10-minute timeout for large uploads. For very large files, consider multipart upload.
     public func putObject<S: AsyncSequence & Sendable>(key: String, stream: S, length: Int64) async throws where S.Element == ByteBuffer {
         guard bucket != nil else { throw S3Error.bucketNotFound }
+        guard !key.isEmpty else { throw S3Error.invalidURL }
         
         let path = key.hasPrefix("/") ? key : "/" + key
         
@@ -575,7 +587,9 @@ public actor S3Client {
             bodyHash: "UNSIGNED-PAYLOAD"
         )
         
-        let response = try await httpClient.execute(request, timeout: .seconds(300))
+        // Use longer timeout for uploads based on file size (minimum 5 min, scale with size)
+        let timeoutSeconds = max(300, Int64(length / (1024 * 1024)) * 2) // ~2s per MB, min 5 min
+        let response = try await httpClient.execute(request, timeout: .seconds(timeoutSeconds))
         guard response.status == HTTPResponseStatus.ok else {
              throw try await handleErrorResponse(response)
         }
@@ -911,11 +925,15 @@ public struct S3Object: CustomStringConvertible, Equatable, Hashable, Sendable {
     /// Indicates if this object represents a directory (common prefix) in a delimited list.
     public let isDirectory: Bool
     
-    public init(key: String, size: Int, lastModified: Date, isDirectory: Bool) {
+    /// The ETag of the object (usually MD5 hash).
+    public let etag: String?
+    
+    public init(key: String, size: Int, lastModified: Date, isDirectory: Bool, etag: String? = nil) {
         self.key = key
         self.size = size
         self.lastModified = lastModified
         self.isDirectory = isDirectory
+        self.etag = etag
     }
     
     public var description: String {
@@ -948,10 +966,43 @@ public struct S3Object: CustomStringConvertible, Equatable, Hashable, Sendable {
 
 // MARK: - Extensions & Helpers
 
+// Thread-safe ISO8601 date formatter
+private enum ISO8601DateFormatterFactory {
+    // Thread-local storage for date formatters to avoid contention
+    private static let threadLocalFormatter = ThreadLocal<ISO8601DateFormatter>()
+    
+    static var formatter: ISO8601DateFormatter {
+        if let existing = threadLocalFormatter.value {
+            return existing
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withTimeZone]
+        threadLocalFormatter.value = formatter
+        return formatter
+    }
+}
+
+// Simple thread-local storage implementation
+private final class ThreadLocal<T>: @unchecked Sendable {
+    private var storage: [ObjectIdentifier: T] = [:]
+    private let lock = NSLock()
+    
+    var value: T? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[ObjectIdentifier(Thread.current)]
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            storage[ObjectIdentifier(Thread.current)] = newValue
+        }
+    }
+}
+
 private var iso8601DateFormatter: ISO8601DateFormatter {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withTimeZone]
-    return formatter
+    ISO8601DateFormatterFactory.formatter
 }
 
 extension Data {

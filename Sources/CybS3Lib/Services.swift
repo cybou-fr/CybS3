@@ -122,6 +122,12 @@ public struct StorageService {
     
     /// HMAC size in bytes
     private static let hmacSize = 32
+    
+    /// Secure file permissions (owner read/write only)
+    private static let secureFilePermissions: Int16 = 0o600
+    
+    /// Secure directory permissions (owner read/write/execute only)
+    private static let secureDirPermissions: Int16 = 0o700
 
     /// Loads the configuration, attempting migration if necessary.
     ///
@@ -132,7 +138,10 @@ public struct StorageService {
         
         // 1. Ensure directory exists
         if !FileManager.default.fileExists(atPath: configDir.path) {
-            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true, attributes: [.posixPermissions: secureDirPermissions])
+        } else {
+            // Verify and fix directory permissions if needed
+            try? FileManager.default.setAttributes([.posixPermissions: secureDirPermissions], ofItemAtPath: configDir.path)
         }
         
         // 2. Check for legacy migration
@@ -227,9 +236,9 @@ public struct StorageService {
         fileData.append(encryptedData)
         
         if !FileManager.default.fileExists(atPath: configPath.path) {
-             _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [.posixPermissions: 0o600])
+             _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [.posixPermissions: secureFilePermissions])
         } else {
-             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
+             try FileManager.default.setAttributes([.posixPermissions: secureFilePermissions], ofItemAtPath: configPath.path)
         }
         
         try fileData.write(to: configPath)

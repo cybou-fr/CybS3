@@ -7,13 +7,18 @@ A secure, command-line S3-compatible object storage browser and file transfer to
 ## Features
 
 - **Standard S3 Operations**:
-- **Standard S3 Operations**:
   - `files list`: List objects (supports prefixes).
   - `buckets list`: List all buckets.
   - `buckets create`: Make (create) a bucket.
   - `files put`: Upload files (automatically encrypted, with progress bar).
   - `files get`: Download files (automatically decrypted, with progress bar).
   - `files delete`: Delete objects.
+
+- **Folder Operations** (NEW):
+  - `folders put`: Upload entire folders recursively with **smart deduplication** (only uploads new/changed files).
+  - `folders get`: Download entire folders recursively.
+  - `folders sync`: Synchronize local folder with S3 (with optional `--delete` for remote cleanup).
+  - `folders watch`: **Live watch mode** - automatically upload changes as files are modified.
   
 - **Security & Encryption**:
   - **BIP39 Mnemonic Support**: Uses standard 12-word recovery phrases as the root of trust.
@@ -145,7 +150,64 @@ cybs3 files list
 # For now, assumes basic list.
 ```
 
-### 4. Direct Configuration (Advanced)
+### 4. Folder Operations (Recursive)
+Manage entire directories with automatic encryption.
+
+**Upload a Folder (with deduplication):**
+```bash
+# Upload folder to S3 (uses folder name as prefix)
+cybs3 folders put ./my-project
+
+# Upload to specific S3 path
+cybs3 folders put ./my-project backups/2026/project
+
+# Dry-run to see what would be uploaded
+cybs3 folders put ./my-project --dry-run
+
+# Force upload all files (ignore deduplication)
+cybs3 folders put ./my-project --force
+
+# Exclude patterns
+cybs3 folders put ./my-project --exclude ".git,node_modules,*.log"
+```
+
+**Download a Folder:**
+```bash
+# Download folder from S3
+cybs3 folders get backups/2026/project
+
+# Download to specific local path
+cybs3 folders get backups/2026/project ./restored-project
+
+# Overwrite existing files
+cybs3 folders get backups/2026/project --overwrite
+```
+
+**Sync a Folder:**
+```bash
+# Sync local folder to S3 (upload new/changed files)
+cybs3 folders sync ./my-project
+
+# Sync and delete remote files that don't exist locally
+cybs3 folders sync ./my-project --delete
+
+# Dry-run sync
+cybs3 folders sync ./my-project --dry-run
+```
+
+**Watch for Changes (Live Sync):**
+```bash
+# Watch folder and auto-upload changes
+cybs3 folders watch ./my-project
+
+# Watch with initial sync
+cybs3 folders watch ./my-project --initial-sync
+
+# Custom poll interval (in seconds)
+cybs3 folders watch ./my-project --interval 5
+```
+
+### 5. Direct Configuration (Advanced)
 If you prefer not to use named vaults, you can configure the active settings directly:
 ```bash
 cybs3 config --endpoint s3.us-east-1.amazonaws.com --bucket my-bucket

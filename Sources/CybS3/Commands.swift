@@ -38,6 +38,9 @@ struct GlobalOptions: ParsableArguments {
     /// 1. Prompts for the Master Key (Mnemonic) to unlock the encrypted configuration.
     /// 2. Loads the encrypted configuration and derives the Data Key.
     /// 3. Resolves S3 settings (Endpoint, Credentials, Region) with the hierarchy: CLI Args > Env Vars > Config.
+    ///
+    /// - Important: The caller is responsible for calling `client.shutdown()` when done to release HTTP resources.
+    ///   Use `defer { try? await client.shutdown() }` after obtaining the client.
     static func createClient(_ options: GlobalOptions, overrideBucket: String? = nil) throws -> (
         S3Client, SymmetricKey, EncryptedConfig, String?, String?
     ) {
@@ -227,6 +230,7 @@ struct CybS3: AsyncParsableCommand {
                 do {
                     let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                         options, overrideBucket: bucketName)
+                    defer { Task { try? await client.shutdown() } }
                     ConsoleUI.dim("Using vault: \(vaultName ?? "default")")
                     try await client.createBucket(name: bucketName)
                     ConsoleUI.success("Created bucket: \(bucketName)")
@@ -262,6 +266,7 @@ struct CybS3: AsyncParsableCommand {
                 
                 do {
                     let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
+                    defer { Task { try? await client.shutdown() } }
                     ConsoleUI.dim("Using vault: \(vaultName ?? "default")")
                     try await client.deleteBucket(name: bucketName)
                     ConsoleUI.success("Deleted bucket: \(bucketName)")
@@ -285,6 +290,7 @@ struct CybS3: AsyncParsableCommand {
 
             func run() async throws {
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
+                defer { Task { try? await client.shutdown() } }
                 if !json {
                     print("Using vault: \(vaultName ?? "default")")
                 }
@@ -346,6 +352,7 @@ struct CybS3: AsyncParsableCommand {
                 }
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
+                defer { Task { try? await client.shutdown() } }
                 
                 if !json {
                     print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
@@ -416,6 +423,7 @@ struct CybS3: AsyncParsableCommand {
                 }
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
+                defer { Task { try? await client.shutdown() } }
                 print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
                 
                 try await client.copyObject(sourceKey: sourceKey, destKey: destKey)
@@ -446,6 +454,7 @@ struct CybS3: AsyncParsableCommand {
                 }
                 let (client, dataKey, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
+                defer { Task { try? await client.shutdown() } }
                 print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
                 let local = localPath ?? key
                 let outputPath = local
@@ -453,6 +462,7 @@ struct CybS3: AsyncParsableCommand {
 
                 _ = FileManager.default.createFile(atPath: outputPath, contents: nil)
                 let fileHandle = try FileHandle(forWritingTo: outputURL)
+                defer { try? fileHandle.close() }
 
                 // Get file size for progress bar
                 let fileSize = try await client.getObjectSize(key: key) ?? 0
@@ -490,7 +500,6 @@ struct CybS3: AsyncParsableCommand {
                     print()
                 }
 
-                try fileHandle.close()
                 print("Downloaded \(key) to \(local)")
             }
         }
@@ -551,11 +560,13 @@ struct CybS3: AsyncParsableCommand {
                 
                 let (client, dataKey, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
+                defer { Task { try? await client.shutdown() } }
                 print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
 
                 let progressBar = ConsoleUI.ProgressBar(title: "Uploading \(remoteKey)")
 
                 let fileHandle = try FileHandle(forReadingFrom: fileURL)
+                defer { try? fileHandle.close() }
 
                 // Track bytes read. Using a class to allow capture in closure.
                 class ProgressTracker: @unchecked Sendable {
@@ -632,6 +643,7 @@ struct CybS3: AsyncParsableCommand {
 
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
+                defer { Task { try? await client.shutdown() } }
                 ConsoleUI.dim("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
                 try await client.deleteObject(key: key)
                 ConsoleUI.success("Deleted \(key)")
@@ -711,6 +723,7 @@ struct CybS3: AsyncParsableCommand {
         subcommands: [
             Buckets.self,
             Files.self,
+            Folders.self,
             Config.self,
             Login.self,
             Logout.self,

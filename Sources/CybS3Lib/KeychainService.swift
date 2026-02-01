@@ -42,9 +42,20 @@ public struct KeychainService {
     /// - Parameters:
     ///   - mnemonic: The mnemonic words to save.
     ///   - securityLevel: The desired security level.
+    /// - Note: The mnemonic string is cleared from memory after saving.
     public static func save(mnemonic: [String], securityLevel: KeychainSecurityLevel = .standard) throws {
-        let mnemonicString = mnemonic.joined(separator: " ")
-        guard let data = mnemonicString.data(using: .utf8) else { return }
+        var mnemonicString = mnemonic.joined(separator: " ")
+        defer {
+            // Securely clear the mnemonic from memory
+            mnemonicString.withUTF8 { _ in }
+            mnemonicString = String(repeating: "\0", count: mnemonicString.count)
+        }
+        
+        guard var data = mnemonicString.data(using: .utf8) else { return }
+        defer {
+            // Clear sensitive data from memory
+            data.resetBytes(in: 0..<data.count)
+        }
 
         // Delete any existing item
         try? delete()

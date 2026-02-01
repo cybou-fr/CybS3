@@ -148,16 +148,24 @@ public struct StreamingEncryption {
             var upstreamIterator: Upstream.AsyncIterator
             let key: SymmetricKey
             var buffer = Data()
+            let expectedBlockSize: Int
+            
+            init(upstreamIterator: Upstream.AsyncIterator, key: SymmetricKey) {
+                self.upstreamIterator = upstreamIterator
+                self.key = key
+                self.expectedBlockSize = StreamingEncryption.chunkSize + 28
+                // Pre-allocate buffer for common case
+                self.buffer.reserveCapacity(expectedBlockSize * 2)
+            }
             
             public mutating func next() async throws -> Data? {
                 // We need to accumulate at least enough data for one block or end of stream
                 
                 while true {
                     // 1. If buffer has enough for a full block (standard size), process it
-                    if buffer.count >= StreamingEncryption.chunkSize + 28 {
-                        let blockSize = StreamingEncryption.chunkSize + 28
-                        let blockData = buffer.prefix(blockSize)
-                        buffer.removeFirst(blockSize)
+                    if buffer.count >= expectedBlockSize {
+                        let blockData = buffer.prefix(expectedBlockSize)
+                        buffer.removeFirst(expectedBlockSize)
                         
                         let sealedBox = try AES.GCM.SealedBox(combined: blockData)
                         return try AES.GCM.open(sealedBox, using: key)
@@ -175,7 +183,7 @@ public struct StreamingEncryption {
                             
                             let sealedBox = try AES.GCM.SealedBox(combined: buffer)
                             let data = try AES.GCM.open(sealedBox, using: key)
-                            buffer.removeAll()
+                            buffer.removeAll(keepingCapacity: true)
                             return data
                         }
                         return nil

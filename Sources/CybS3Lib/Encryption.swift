@@ -2,10 +2,24 @@ import Foundation
 import Crypto
 import SwiftBIP39
 
-public enum EncryptionError: Error {
+public enum EncryptionError: Error, LocalizedError {
     case encryptionFailed
     case decryptionFailed
     case invalidKey
+    case keyDerivationFailed(reason: String)
+    
+    public var errorDescription: String? {
+        switch self {
+        case .encryptionFailed:
+            return "Encryption operation failed"
+        case .decryptionFailed:
+            return "Decryption operation failed - data may be corrupted or key incorrect"
+        case .invalidKey:
+            return "Invalid encryption key"
+        case .keyDerivationFailed(let reason):
+            return "Key derivation failed: \(reason)"
+        }
+    }
 }
 
 public struct Encryption {
@@ -93,23 +107,40 @@ public struct Encryption {
     private static func internalPBKDF2(password: Data, salt: Data, rounds: UInt32, byteCount: Int) throws -> Data {
         // Initial Key for HMAC is the password
         let key = SymmetricKey(data: password)
+        
+        // Pre-allocate capacity to avoid reallocations
         var derived = Data()
+        derived.reserveCapacity(byteCount)
+        
         var blockIndex = 1
+        let hashSize = 64 // SHA512 output size
         
         while derived.count < byteCount {
-            var input = salt
+            var input = Data()
+            input.reserveCapacity(salt.count + 4)
+            input.append(salt)
             var bigIndex = UInt32(blockIndex).bigEndian
             input.append(contentsOf: withUnsafeBytes(of: &bigIndex) { Data($0) })
             
             var u = HMAC<SHA512>.authenticationCode(for: input, using: key)
-            var block = Data(u) // Convert to Data for XORing
+            
+            // Pre-allocate block with exact size
+            var block = Data()
+            block.reserveCapacity(hashSize)
+            block.append(contentsOf: u)
             
             for _ in 1..<rounds {
                 // Pass Data(u) back into HMAC
                 u = HMAC<SHA512>.authenticationCode(for: Data(u), using: key)
-                let uData = Data(u)
-                for i in 0..<block.count {
-                    block[i] ^= uData[i]
+                // XOR in place for better performance
+                u.withUnsafeBytes { uBytes in
+                    block.withUnsafeMutableBytes { blockBytes in
+                        let uPtr = uBytes.bindMemory(to: UInt8.self)
+                        let blockPtr = blockBytes.bindMemory(to: UInt8.self)
+                        for i in 0..<hashSize {
+                            blockPtr[i] ^= uPtr[i]
+                        }
+                    }
                 }
             }
             

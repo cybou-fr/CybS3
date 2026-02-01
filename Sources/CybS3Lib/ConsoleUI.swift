@@ -195,6 +195,7 @@ public struct ConsoleUI {
         private var lastUpdate: Date
         private var bytesProcessed: Int64 = 0
         private let showSpeed: Bool
+        private let lock = NSLock()
         
         public init(title: String, width: Int = 40, showSpeed: Bool = true) {
             self.title = title
@@ -207,6 +208,9 @@ public struct ConsoleUI {
         }
         
         public func update(progress: Double, bytesProcessed: Int64? = nil) {
+            lock.lock()
+            defer { lock.unlock() }
+            
             let percentage = Int(min(1.0, max(0.0, progress)) * 100)
             
             if let bytes = bytesProcessed {
