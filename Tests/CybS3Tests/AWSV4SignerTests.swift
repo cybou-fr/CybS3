@@ -378,4 +378,108 @@ final class AWSV4SignerTests: XCTestCase {
         XCTAssertTrue(dateHeader.hasSuffix("Z"))
         XCTAssertEqual(dateHeader.count, 16)
     }
+    
+    // MARK: - AWS URI Encoding Tests
+    
+    func testAWSURIEncodingUnreservedCharacters() {
+        // Unreserved characters should NOT be encoded
+        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+        XCTAssertEqual(unreserved.awsURIEncoded(), unreserved)
+    }
+    
+    func testAWSURIEncodingReservedCharacters() {
+        // Reserved characters should be encoded
+        XCTAssertEqual("/".awsURIEncoded(), "%2F")
+        XCTAssertEqual("?".awsURIEncoded(), "%3F")
+        XCTAssertEqual("=".awsURIEncoded(), "%3D")
+        XCTAssertEqual("&".awsURIEncoded(), "%26")
+        XCTAssertEqual(":".awsURIEncoded(), "%3A")
+        XCTAssertEqual("@".awsURIEncoded(), "%40")
+        XCTAssertEqual("+".awsURIEncoded(), "%2B")
+        XCTAssertEqual(" ".awsURIEncoded(), "%20")
+    }
+    
+    func testAWSURIEncodingUnicodeCharacters() {
+        // Unicode characters should be encoded
+        XCTAssertEqual("é".awsURIEncoded(), "%C3%A9")
+        XCTAssertEqual("文".awsURIEncoded(), "%E6%96%87")
+        XCTAssertEqual("🚀".awsURIEncoded(), "%F0%9F%9A%80")
+        XCTAssertEqual("ファイル".awsURIEncoded(), "%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB")
+        XCTAssertEqual("файл".awsURIEncoded(), "%D1%84%D0%B0%D0%B9%D0%BB")
+    }
+    
+    func testAWSPathEncodingPreservesSlashes() {
+        // Path encoding should preserve forward slashes
+        XCTAssertEqual("folder/subfolder/file.txt".awsPathEncoded(), "folder/subfolder/file.txt")
+        XCTAssertEqual("/root/folder/file".awsPathEncoded(), "/root/folder/file")
+    }
+    
+    func testAWSPathEncodingWithUnicode() {
+        // Path encoding should encode Unicode but preserve slashes
+        XCTAssertEqual("folder/文件.txt".awsPathEncoded(), "folder/%E6%96%87%E4%BB%B6.txt")
+        XCTAssertEqual("/dossier/fichier-français.txt".awsPathEncoded(), "/dossier/fichier-fran%C3%A7ais.txt")
+        XCTAssertEqual("путь/файл.txt".awsPathEncoded(), "%D0%BF%D1%83%D1%82%D1%8C/%D1%84%D0%B0%D0%B9%D0%BB.txt")
+    }
+    
+    func testAWSPathEncodingWithSpaces() {
+        // Spaces should be encoded as %20 (not +)
+        XCTAssertEqual("my file.txt".awsPathEncoded(), "my%20file.txt")
+        XCTAssertEqual("folder name/file name.txt".awsPathEncoded(), "folder%20name/file%20name.txt")
+    }
+    
+    func testAWSQueryEncodingEncodesSlashes() {
+        // Query encoding should encode forward slashes
+        XCTAssertEqual("prefix/value".awsQueryEncoded(), "prefix%2Fvalue")
+        XCTAssertEqual("folder1/".awsQueryEncoded(), "folder1%2F")
+    }
+    
+    func testAWSQueryEncodingWithSpecialCharacters() {
+        XCTAssertEqual("name=value".awsQueryEncoded(), "name%3Dvalue")
+        XCTAssertEqual("hello world".awsQueryEncoded(), "hello%20world")
+        XCTAssertEqual("a+b".awsQueryEncoded(), "a%2Bb")
+    }
+    
+    func testAWSEncodingRoundTrip() {
+        // Test that encoding can be decoded back (using percent decoding)
+        let testStrings = [
+            "simple",
+            "with space",
+            "unicode-文件",
+            "emoji-🚀",
+            "français",
+            "path/to/file",
+            "name=value&other=test"
+        ]
+        
+        for original in testStrings {
+            let encoded = original.awsURIEncoded()
+            let decoded = encoded.removingPercentEncoding
+            XCTAssertEqual(decoded, original, "Round-trip failed for: \(original)")
+        }
+    }
+    
+    func testAWSPathEncodingEmptyString() {
+        XCTAssertEqual("".awsPathEncoded(), "")
+        XCTAssertEqual("".awsURIEncoded(), "")
+        XCTAssertEqual("".awsQueryEncoded(), "")
+    }
+    
+    func testAWSPathEncodingOnlySlashes() {
+        XCTAssertEqual("/".awsPathEncoded(), "/")
+        XCTAssertEqual("//".awsPathEncoded(), "//")
+        XCTAssertEqual("/a/b/c/".awsPathEncoded(), "/a/b/c/")
+    }
+    
+    func testAWSEncodingMixedContent() {
+        // Real-world example: a file path with various characters
+        let path = "/bucket/folder/My Document (2024)-日本語.pdf"
+        let encoded = path.awsPathEncoded()
+        
+        // Should preserve slashes but encode spaces, parentheses, and Unicode
+        XCTAssertTrue(encoded.contains("/bucket/folder/"))
+        XCTAssertTrue(encoded.contains("%20"))  // Space
+        XCTAssertTrue(encoded.contains("%28"))  // (
+        XCTAssertTrue(encoded.contains("%29"))  // )
+        XCTAssertFalse(encoded.contains(" "))   // No raw spaces
+    }
 }

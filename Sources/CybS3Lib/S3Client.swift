@@ -102,6 +102,38 @@ struct S3ErrorParser {
     }
 }
 
+// MARK: - AWS URI Encoding
+
+/// AWS S3 requires specific URI encoding rules that differ from standard URL encoding.
+/// Per AWS documentation, the following characters should NOT be encoded:
+/// - Unreserved characters: A-Z, a-z, 0-9, hyphen (-), underscore (_), period (.), tilde (~)
+/// All other characters must be percent-encoded.
+extension String {
+    /// Encodes a string for use in AWS S3 URI paths.
+    /// This follows AWS URI encoding rules where only unreserved characters are allowed.
+    func awsURIEncoded() -> String {
+        // AWS unreserved characters: A-Z a-z 0-9 - _ . ~
+        var allowed = CharacterSet()
+        allowed.insert(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+        return self.addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    }
+    
+    /// Encodes a string for use in AWS S3 URI paths, preserving forward slashes.
+    /// Use this for object keys that contain path separators.
+    func awsPathEncoded() -> String {
+        // Split by /, encode each segment, rejoin with /
+        return self.split(separator: "/", omittingEmptySubsequences: false)
+            .map { String($0).awsURIEncoded() }
+            .joined(separator: "/")
+    }
+    
+    /// Encodes a string for use in AWS S3 query parameter values.
+    /// Forward slashes ARE encoded in query parameters.
+    func awsQueryEncoded() -> String {
+        return self.awsURIEncoded()
+    }
+}
+
 /// Represents an S3 endpoint configuration.
 public struct S3Endpoint: Sendable {
     /// The hostname of the S3 service (e.g., `s3.amazonaws.com`).
@@ -187,18 +219,28 @@ struct AWSV4Signer {
             "\(key):\(signedHeadersDict[key]!)"
         }.joined(separator: "\n")
         
-        // Canonical Query
+        // Canonical Query - must use AWS-specific encoding
+        // Use percentEncodedQuery to get the already-encoded query string,
+        // then parse and re-sort it (since it's already properly encoded)
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        let canonicalQuery = components?.queryItems?
-            .sorted { $0.name < $1.name }
-            .map { item in
-                let encodedName = item.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? item.name
-                let encodedValue = item.value?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                return "\(encodedName)=\(encodedValue)"
+        let canonicalQuery: String
+        if let encodedQuery = components?.percentEncodedQuery, !encodedQuery.isEmpty {
+            // Parse the already-encoded query string, sort by name, rejoin
+            let pairs = encodedQuery.split(separator: "&").map { String($0) }
+            let sortedPairs = pairs.sorted { pair1, pair2 in
+                let name1 = pair1.split(separator: "=", maxSplits: 1).first ?? ""
+                let name2 = pair2.split(separator: "=", maxSplits: 1).first ?? ""
+                return name1 < name2
             }
-            .joined(separator: "&") ?? ""
-            
-        let canonicalPath = url.path.isEmpty ? "/" : url.path
+            canonicalQuery = sortedPairs.joined(separator: "&")
+        } else {
+            canonicalQuery = ""
+        }
+        
+        // Canonical Path - must use AWS-specific encoding
+        // url.path returns decoded path, we need to re-encode it for signing
+        let rawPath = url.path.isEmpty ? "/" : url.path
+        let canonicalPath = rawPath.awsPathEncoded()
         
         let canonicalRequest = [
             method,
@@ -346,11 +388,20 @@ public actor S3Client {
             urlComponents?.host = "\(bucket).\(endpoint.host)"
         }
         
-        // Ensure path starts with /
-        urlComponents?.path = path.hasPrefix("/") ? path : "/" + path
+        // Encode path using AWS-compatible encoding
+        // We use percentEncodedPath to ensure the URL contains properly encoded characters
+        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
+        urlComponents?.percentEncodedPath = normalizedPath.awsPathEncoded()
         
+        // Encode query items using AWS-compatible encoding
         if !queryItems.isEmpty {
-            urlComponents?.queryItems = queryItems
+            urlComponents?.percentEncodedQuery = queryItems
+                .map { item in
+                    let encodedName = item.name.awsQueryEncoded()
+                    let encodedValue = (item.value ?? "").awsQueryEncoded()
+                    return "\(encodedName)=\(encodedValue)"
+                }
+                .joined(separator: "&")
         }
         
         guard let url = urlComponents?.url else {
