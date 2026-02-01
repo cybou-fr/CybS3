@@ -3,7 +3,6 @@ import Foundation
 public struct ConsoleUI {
     
     /// A simple ANSI progress bar.
-    /// A simple ANSI progress bar.
     public class ProgressBar: @unchecked Sendable {
         private let width: Int
         private let title: String

@@ -215,7 +215,38 @@ struct CybS3: AsyncParsableCommand {
                     options, overrideBucket: bucketName)
                 print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
                 try await client.createBucket(name: bucketName)
-                print("Created bucket: \(bucketName)")
+                print("✅ Created bucket: \(bucketName)")
+            }
+        }
+        
+        struct Delete: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "delete",
+                abstract: "Delete an empty bucket"
+            )
+
+            @OptionGroup var options: GlobalOptions
+
+            @Argument(help: "Bucket name to delete")
+            var bucketName: String
+            
+            @Flag(name: .shortAndLong, help: "Force delete without confirmation")
+            var force: Bool = false
+
+            func run() async throws {
+                if !force {
+                    print("⚠️  Are you sure you want to delete bucket '\(bucketName)'? This cannot be undone. [y/N] ", terminator: "")
+                    fflush(stdout)
+                    guard let input = readLine(), input.lowercased() == "y" else {
+                        print("Operation aborted.")
+                        return
+                    }
+                }
+                
+                let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
+                print("Using vault: \(vaultName ?? "default")")
+                try await client.deleteBucket(name: bucketName)
+                print("✅ Deleted bucket: \(bucketName)")
             }
         }
 
@@ -226,15 +257,27 @@ struct CybS3: AsyncParsableCommand {
             )
 
             @OptionGroup var options: GlobalOptions
+            
+            @Flag(name: .long, help: "Output as JSON")
+            var json: Bool = false
 
             func run() async throws {
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(options)
-                print("Using vault: \(vaultName ?? "default")")
+                if !json {
+                    print("Using vault: \(vaultName ?? "default")")
+                }
                 let buckets = try await client.listBuckets()
 
-                print("Buckets:")
-                for bucket in buckets {
-                    print("  \(bucket)")
+                if json {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    let data = try encoder.encode(["buckets": buckets])
+                    print(String(data: data, encoding: .utf8) ?? "[]")
+                } else {
+                    print("Buckets:")
+                    for bucket in buckets {
+                        print("  \(bucket)")
+                    }
                 }
             }
         }
@@ -251,6 +294,7 @@ struct CybS3: AsyncParsableCommand {
                 Get.self,
                 Put.self,
                 Delete.self,
+                Copy.self,
             ]
         )
 
@@ -261,6 +305,85 @@ struct CybS3: AsyncParsableCommand {
             )
 
             @OptionGroup var options: GlobalOptions
+            
+            @Option(name: .shortAndLong, help: "Filter by prefix (folder path)")
+            var prefix: String?
+            
+            @Option(name: .shortAndLong, help: "Delimiter for grouping (e.g., '/')")
+            var delimiter: String?
+            
+            @Flag(name: .long, help: "Output as JSON")
+            var json: Bool = false
+
+            func run() async throws {
+                var bucketName: String
+                if let b = options.bucket {
+                    bucketName = b
+                } else {
+                    bucketName = try InteractionService.promptForBucket()
+                }
+                let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
+                    options, overrideBucket: bucketName)
+                
+                if !json {
+                    print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
+                    if let prefix = prefix {
+                        print("Filtering by prefix: \(prefix)")
+                    }
+                }
+                
+                let objects = try await client.listObjects(prefix: prefix, delimiter: delimiter)
+
+                if json {
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    encoder.dateEncodingStrategy = .iso8601
+                    
+                    struct FileInfo: Encodable {
+                        let key: String
+                        let size: Int
+                        let lastModified: Date
+                        let isDirectory: Bool
+                    }
+                    
+                    struct FilesOutput: Encodable {
+                        let objects: [FileInfo]
+                        let count: Int
+                    }
+                    
+                    let fileInfos = objects.map { obj in
+                        FileInfo(key: obj.key, size: obj.size, lastModified: obj.lastModified, isDirectory: obj.isDirectory)
+                    }
+                    let output = FilesOutput(objects: fileInfos, count: objects.count)
+                    let data = try encoder.encode(output)
+                    print(String(data: data, encoding: .utf8) ?? "{}")
+                } else {
+                    if objects.isEmpty {
+                        print("No objects found.")
+                    } else {
+                        print("\nFound \(objects.count) object(s):")
+                        print(String(repeating: "-", count: 60))
+                        for object in objects {
+                            print(object)
+                        }
+                    }
+                }
+            }
+        }
+        
+        struct Copy: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "copy",
+                abstract: "Copy a file within S3"
+            )
+
+            @OptionGroup var options: GlobalOptions
+
+            @Argument(help: "Source file key")
+            var sourceKey: String
+            
+            @Argument(help: "Destination file key")
+            var destKey: String
 
             func run() async throws {
                 var bucketName: String
@@ -272,11 +395,9 @@ struct CybS3: AsyncParsableCommand {
                 let (client, _, _, vaultName, _) = try GlobalOptions.createClient(
                     options, overrideBucket: bucketName)
                 print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
-                let objects = try await client.listObjects()
-
-                for object in objects {
-                    print(object)
-                }
+                
+                try await client.copyObject(sourceKey: sourceKey, destKey: destKey)
+                print("✅ Copied '\(sourceKey)' to '\(destKey)'")
             }
         }
 
@@ -365,6 +486,9 @@ struct CybS3: AsyncParsableCommand {
 
             @Argument(help: "Remote file key")
             var key: String?
+            
+            @Flag(name: .long, help: "Show what would be uploaded without actually uploading")
+            var dryRun: Bool = false
 
             func run() async throws {
                 var bucketName: String
@@ -373,12 +497,10 @@ struct CybS3: AsyncParsableCommand {
                 } else {
                     bucketName = try InteractionService.promptForBucket()
                 }
-                let (client, dataKey, _, vaultName, _) = try GlobalOptions.createClient(
-                    options, overrideBucket: bucketName)
-                print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
+                
                 let fileURL = URL(fileURLWithPath: localPath)
                 guard FileManager.default.fileExists(atPath: localPath) else {
-                    print("Error: File not found: \(localPath)")
+                    print("❌ Error: File not found: \(localPath)")
                     throw ExitCode.failure
                 }
 
@@ -387,6 +509,27 @@ struct CybS3: AsyncParsableCommand {
                 let fileSize =
                     try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64
                     ?? 0
+                
+                // Calculate encrypted size using the helper
+                let encryptedSize = StreamingEncryption.encryptedSize(plaintextSize: fileSize)
+                
+                // Dry-run mode
+                if dryRun {
+                    print("\n🔍 Dry Run - Upload Preview:")
+                    print(String(repeating: "-", count: 50))
+                    print("  Source:           \(localPath)")
+                    print("  Destination:      s3://\(bucketName)/\(remoteKey)")
+                    print("  Original size:    \(formatBytes(Int(fileSize)))")
+                    print("  Encrypted size:   \(formatBytes(Int(encryptedSize)))")
+                    print("  Overhead:         \(formatBytes(Int(encryptedSize - fileSize)))")
+                    print(String(repeating: "-", count: 50))
+                    print("✅ No changes made (dry-run mode)")
+                    return
+                }
+                
+                let (client, dataKey, _, vaultName, _) = try GlobalOptions.createClient(
+                    options, overrideBucket: bucketName)
+                print("Using vault: \(vaultName ?? "default") and bucket: \(bucketName)")
 
                 let progressBar = ConsoleUI.ProgressBar(title: "Uploading \(remoteKey)")
 
@@ -414,19 +557,24 @@ struct CybS3: AsyncParsableCommand {
 
                 let uploadStream = encryptedStream.map { ByteBuffer(data: $0) }
 
-                // Overhead calculation
-                let fullChunks = fileSize / Int64(StreamingEncryption.chunkSize)
-                let remainingBytes = fileSize % Int64(StreamingEncryption.chunkSize)
-                var totalEncryptedSize = fullChunks * Int64(StreamingEncryption.chunkSize + 28)
-                if remainingBytes > 0 {
-                    totalEncryptedSize += (remainingBytes + 28)
-                }
-
                 try await client.putObject(
-                    key: remoteKey, stream: uploadStream, length: totalEncryptedSize)
+                    key: remoteKey, stream: uploadStream, length: encryptedSize)
 
                 progressBar.complete()
-                print("Uploaded \(localPath) as \(remoteKey)")
+                print("✅ Uploaded \(localPath) as \(remoteKey)")
+            }
+            
+            private func formatBytes(_ bytes: Int) -> String {
+                let units = ["B", "KB", "MB", "GB", "TB"]
+                var size = Double(bytes)
+                var unitIndex = 0
+                
+                while size >= 1024 && unitIndex < units.count - 1 {
+                    size /= 1024
+                    unitIndex += 1
+                }
+                
+                return String(format: "%.2f %@", size, units[unitIndex])
             }
         }
 

@@ -13,17 +13,18 @@ import FoundationNetworking
 import FoundationXML
 #endif
 
-// Re-export S3Object and S3Error for Commands.swift
+// MARK: - S3 Error Types
 
 /// Errors that can occur during S3 operations.
-/// Errors that can occur during S3 operations.
-public enum S3Error: Error {
+public enum S3Error: Error, LocalizedError {
     /// The provided URL or endpoint was invalid.
     case invalidURL
     /// Authentication with S3 failed (e.g., invalid keys).
     case authenticationFailed
-    /// The request failed with a specific error message.
-    case requestFailed(String)
+    /// The request failed with details from S3.
+    case requestFailed(status: Int, code: String?, message: String?)
+    /// Legacy request failed for backward compatibility.
+    case requestFailedLegacy(String)
     /// The response from S3 was invalid or could not be parsed.
     case invalidResponse
     /// The specified bucket was not found.
@@ -32,6 +33,73 @@ public enum S3Error: Error {
     case objectNotFound
     /// Access to the local file system failed.
     case fileAccessFailed
+    /// Access denied to the resource.
+    case accessDenied(resource: String?)
+    /// The bucket is not empty (for delete operations).
+    case bucketNotEmpty
+    
+    public var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "❌ Invalid URL: Check your endpoint configuration."
+        case .authenticationFailed:
+            return "❌ Authentication Failed: Check your Access Key and Secret Key."
+        case .requestFailed(let status, let code, let message):
+            var desc = "❌ Request Failed (HTTP \(status))"
+            if let code = code { desc += "\n   Code: \(code)" }
+            if let message = message { desc += "\n   Message: \(message)" }
+            return desc
+        case .requestFailedLegacy(let msg):
+            return "❌ Request Failed: \(msg)"
+        case .invalidResponse:
+            return "❌ Invalid Response: The server returned an unexpected response."
+        case .bucketNotFound:
+            return "❌ Bucket Not Found: Specify a bucket with --bucket or select a vault."
+        case .objectNotFound:
+            return "❌ Object Not Found: The specified key does not exist."
+        case .fileAccessFailed:
+            return "❌ File Access Failed: Check file permissions and path."
+        case .accessDenied(let resource):
+            if let resource = resource {
+                return "❌ Access Denied: You don't have permission to access '\(resource)'."
+            }
+            return "❌ Access Denied: Check your credentials and bucket policies."
+        case .bucketNotEmpty:
+            return "❌ Bucket Not Empty: Delete all objects before deleting the bucket."
+        }
+    }
+}
+
+/// Helper to parse S3 XML error responses.
+struct S3ErrorParser {
+    /// Parses an S3 XML error response and returns an appropriate S3Error.
+    static func parse(data: Data, status: Int) -> S3Error {
+        do {
+            let xml = try XMLDocument(data: data)
+            let code = try xml.nodes(forXPath: "//Error/Code").first?.stringValue
+            let message = try xml.nodes(forXPath: "//Error/Message").first?.stringValue
+            
+            // Map common S3 error codes to specific errors
+            switch code {
+            case "AccessDenied":
+                return .accessDenied(resource: nil)
+            case "NoSuchBucket":
+                return .bucketNotFound
+            case "NoSuchKey":
+                return .objectNotFound
+            case "BucketNotEmpty":
+                return .bucketNotEmpty
+            case "InvalidAccessKeyId", "SignatureDoesNotMatch":
+                return .authenticationFailed
+            default:
+                return .requestFailed(status: status, code: code, message: message)
+            }
+        } catch {
+            // If we can't parse XML, return generic error with raw data
+            let rawMessage = String(data: data, encoding: .utf8)
+            return .requestFailed(status: status, code: nil, message: rawMessage)
+        }
+    }
 }
 
 /// Represents an S3 endpoint configuration.
@@ -170,10 +238,6 @@ struct AWSV4Signer {
 
 // MARK: - S3 Client
 
-// MARK: - S3 Client
-
-/// An actor that manages S3 interactions such as listing buckets, objects, and uploading/downloading files.
-/// It uses `AsyncHTTPClient` for networking and `AWSV4Signer` for authentication.
 /// An actor that manages S3 interactions such as listing buckets, objects, and uploading/downloading files.
 /// It uses `AsyncHTTPClient` for networking and `AWSV4Signer` for authentication.
 public actor S3Client {
@@ -184,6 +248,36 @@ public actor S3Client {
     private let signer: AWSV4Signer
     private let logger: Logger
     
+    /// Configuration options for the S3 client.
+    public struct Configuration: Sendable {
+        /// Maximum concurrent connections per host.
+        public var maxConnectionsPerHost: Int
+        /// Connection idle timeout in seconds.
+        public var connectionIdleTimeout: Int
+        /// Request timeout in seconds.
+        public var requestTimeout: Int
+        
+        public init(
+            maxConnectionsPerHost: Int = 8,
+            connectionIdleTimeout: Int = 60,
+            requestTimeout: Int = 300
+        ) {
+            self.maxConnectionsPerHost = maxConnectionsPerHost
+            self.connectionIdleTimeout = connectionIdleTimeout
+            self.requestTimeout = requestTimeout
+        }
+        
+        /// Default configuration for general use.
+        public static let `default` = Configuration()
+        
+        /// High-performance configuration for large transfers.
+        public static let highPerformance = Configuration(
+            maxConnectionsPerHost: 16,
+            connectionIdleTimeout: 120,
+            requestTimeout: 600
+        )
+    }
+    
     /// Initializes a new S3Client.
     ///
     /// - Parameters:
@@ -192,23 +286,39 @@ public actor S3Client {
     ///   - secretKey: AWS Secret Access Key.
     ///   - bucket: Optional bucket name to use as context for operations.
     ///   - region: AWS Region (default "us-east-1").
+    ///   - configuration: Client configuration options.
     public init(
         endpoint: S3Endpoint,
         accessKey: String,
         secretKey: String,
         bucket: String? = nil,
-        region: String = "us-east-1"
+        region: String = "us-east-1",
+        configuration: Configuration = .default
     ) {
         self.endpoint = endpoint
         self.bucket = bucket
         self.region = region
-        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton)
+        
+        // Configure HTTP client with connection pooling
+        var httpConfig = HTTPClient.Configuration()
+        httpConfig.connectionPool = HTTPClient.Configuration.ConnectionPool(
+            idleTimeout: .seconds(Int64(configuration.connectionIdleTimeout)),
+            concurrentHTTP1ConnectionsPerHostSoftLimit: configuration.maxConnectionsPerHost
+        )
+        httpConfig.timeout = HTTPClient.Configuration.Timeout(
+            connect: .seconds(30),
+            read: .seconds(Int64(configuration.requestTimeout))
+        )
+        
+        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton, configuration: httpConfig)
         self.signer = AWSV4Signer(accessKey: accessKey, secretKey: secretKey, region: region)
         self.logger = Logger(label: "com.cybs3.client")
     }
     
-    deinit {
-        try? httpClient.syncShutdown()
+    /// Gracefully shuts down the HTTP client.
+    /// Call this method when you're done using the S3Client to release resources.
+    public func shutdown() async throws {
+        try await httpClient.shutdown()
     }
     
     // MARK: - Request Building
@@ -259,6 +369,13 @@ public actor S3Client {
         return request
     }
     
+    /// Helper to handle S3 error responses.
+    private func handleErrorResponse(_ response: HTTPClientResponse) async throws -> S3Error {
+        let body = try await response.body.collect(upTo: 1024 * 1024)
+        let data = Data(buffer: body)
+        return S3ErrorParser.parse(data: data, status: Int(response.status.code))
+    }
+    
     // MARK: - Public API
     
     /// Lists all buckets owned by the authenticated sender.
@@ -268,7 +385,7 @@ public actor S3Client {
         
         let response = try await httpClient.execute(request, timeout: .seconds(30))
         guard response.status == HTTPResponseStatus.ok else {
-            throw S3Error.requestFailed("Status: \(response.status)")
+            throw try await handleErrorResponse(response)
         }
         
         let body = try await response.body.collect(upTo: 10 * 1024 * 1024)
@@ -317,7 +434,7 @@ public actor S3Client {
             
             let response = try await httpClient.execute(request, timeout: .seconds(30))
             guard response.status == HTTPResponseStatus.ok else {
-                throw S3Error.requestFailed("Status: \(response.status)")
+                throw try await handleErrorResponse(response)
             }
             
             let body = try await response.body.collect(upTo: 20 * 1024 * 1024)
@@ -384,7 +501,10 @@ public actor S3Client {
             if response.status == HTTPResponseStatus.notFound {
                 throw S3Error.objectNotFound
             }
-            throw S3Error.requestFailed("Status: \(response.status)")
+            if response.status == HTTPResponseStatus.forbidden {
+                throw S3Error.accessDenied(resource: key)
+            }
+            throw try await handleErrorResponse(response)
         }
         
         return AsyncThrowingStream { continuation in
@@ -421,7 +541,10 @@ public actor S3Client {
             if response.status == HTTPResponseStatus.notFound {
                 return nil
             }
-            throw S3Error.requestFailed("Status: \(response.status)")
+            if response.status == HTTPResponseStatus.forbidden {
+                throw S3Error.accessDenied(resource: key)
+            }
+            throw S3Error.requestFailed(status: Int(response.status.code), code: nil, message: "HEAD request failed")
         }
         
         if let contentLength = response.headers.first(name: "Content-Length"),
@@ -454,7 +577,7 @@ public actor S3Client {
         
         let response = try await httpClient.execute(request, timeout: .seconds(300))
         guard response.status == HTTPResponseStatus.ok else {
-             throw S3Error.requestFailed("Failed to upload object: \(response.status)")
+             throw try await handleErrorResponse(response)
         }
     }
     
@@ -466,8 +589,11 @@ public actor S3Client {
         let request = try await buildRequest(method: "DELETE", path: path)
         
         let response = try await httpClient.execute(request, timeout: .seconds(30))
-        guard response.status == HTTPResponseStatus.noContent else {
-             throw S3Error.requestFailed("Failed to delete object: \(response.status)")
+        guard response.status == HTTPResponseStatus.noContent || response.status == HTTPResponseStatus.ok else {
+            if response.status == HTTPResponseStatus.notFound {
+                throw S3Error.objectNotFound
+            }
+            throw try await handleErrorResponse(response)
         }
     }
     
@@ -505,9 +631,266 @@ public actor S3Client {
         let response = try await httpClient.execute(request, timeout: .seconds(30))
         
         if response.status != HTTPResponseStatus.ok {
-             let errBody = try? await response.body.collect(upTo: 1024 * 1024)
-             let errStr = errBody.map { String(buffer: $0) } ?? ""
-             throw S3Error.requestFailed("Failed to create bucket: \(response.status) \(errStr)")
+            let errBody = try await response.body.collect(upTo: 1024 * 1024)
+            let data = Data(buffer: errBody)
+            throw S3ErrorParser.parse(data: data, status: Int(response.status.code))
+        }
+    }
+    
+    /// Deletes an empty bucket.
+    ///
+    /// - Parameter name: The name of the bucket to delete.
+    /// - Note: The bucket must be empty before it can be deleted.
+    public func deleteBucket(name: String) async throws {
+        // Build request without bucket context (path-style for bucket operations)
+        guard let baseURL = endpoint.url else {
+            throw S3Error.invalidURL
+        }
+        
+        var urlComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        urlComponents?.host = "\(name).\(endpoint.host)"
+        urlComponents?.path = "/"
+        
+        guard let url = urlComponents?.url else {
+            throw S3Error.invalidURL
+        }
+        
+        var request = HTTPClientRequest(url: url.absoluteString)
+        request.method = .DELETE
+        
+        let bodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // Empty body hash
+        
+        signer.sign(
+            request: &request,
+            url: url,
+            method: "DELETE",
+            bodyHash: bodyHash,
+            headers: [:]
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        
+        // 204 No Content is success for DELETE bucket
+        guard response.status == .noContent || response.status == .ok else {
+            let errBody = try await response.body.collect(upTo: 1024 * 1024)
+            let data = Data(buffer: errBody)
+            throw S3ErrorParser.parse(data: data, status: Int(response.status.code))
+        }
+    }
+    
+    /// Copies an object within the same bucket or across buckets.
+    ///
+    /// - Parameters:
+    ///   - sourceKey: The key of the source object.
+    ///   - destKey: The key for the destination object.
+    ///   - sourceBucket: Optional source bucket (defaults to current bucket).
+    public func copyObject(sourceKey: String, destKey: String, sourceBucket: String? = nil) async throws {
+        guard let currentBucket = bucket else { throw S3Error.bucketNotFound }
+        
+        let source = "/\(sourceBucket ?? currentBucket)/\(sourceKey)"
+        let destPath = destKey.hasPrefix("/") ? destKey : "/" + destKey
+        
+        let request = try await buildRequest(
+            method: "PUT",
+            path: destPath,
+            headers: ["x-amz-copy-source": source]
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(300))
+        
+        guard response.status == .ok else {
+            throw try await handleErrorResponse(response)
+        }
+    }
+    
+    // MARK: - Multipart Upload API
+    
+    /// Represents a completed part in a multipart upload.
+    public struct CompletedPart: Sendable {
+        public let partNumber: Int
+        public let etag: String
+        
+        public init(partNumber: Int, etag: String) {
+            self.partNumber = partNumber
+            self.etag = etag
+        }
+    }
+    
+    /// Initiates a multipart upload and returns the upload ID.
+    ///
+    /// - Parameter key: The object key for the upload.
+    /// - Returns: The upload ID to use for subsequent part uploads.
+    public func initiateMultipartUpload(key: String) async throws -> String {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        let request = try await buildRequest(
+            method: "POST",
+            path: path,
+            queryItems: [URLQueryItem(name: "uploads", value: "")]
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        
+        guard response.status == .ok else {
+            throw try await handleErrorResponse(response)
+        }
+        
+        let body = try await response.body.collect(upTo: 1024 * 1024)
+        let data = Data(buffer: body)
+        let xml = try XMLDocument(data: data)
+        
+        guard let uploadId = try xml.nodes(forXPath: "//InitiateMultipartUploadResult/UploadId").first?.stringValue else {
+            throw S3Error.invalidResponse
+        }
+        
+        return uploadId
+    }
+    
+    /// Uploads a part of a multipart upload.
+    ///
+    /// - Parameters:
+    ///   - key: The object key.
+    ///   - uploadId: The upload ID from `initiateMultipartUpload`.
+    ///   - partNumber: The part number (1-10000).
+    ///   - data: The data for this part.
+    /// - Returns: The ETag for the uploaded part.
+    public func uploadPart(key: String, uploadId: String, partNumber: Int, data: Data) async throws -> String {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        let bodyHash = data.sha256()
+        
+        let request = try await buildRequest(
+            method: "PUT",
+            path: path,
+            queryItems: [
+                URLQueryItem(name: "partNumber", value: String(partNumber)),
+                URLQueryItem(name: "uploadId", value: uploadId)
+            ],
+            headers: ["Content-Type": "application/octet-stream"],
+            body: .bytes(ByteBuffer(data: data)),
+            bodyHash: bodyHash
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(300))
+        
+        guard response.status == .ok else {
+            throw try await handleErrorResponse(response)
+        }
+        
+        guard let etag = response.headers.first(name: "ETag") else {
+            throw S3Error.invalidResponse
+        }
+        
+        return etag
+    }
+    
+    /// Completes a multipart upload.
+    ///
+    /// - Parameters:
+    ///   - key: The object key.
+    ///   - uploadId: The upload ID.
+    ///   - parts: Array of completed parts with their ETags.
+    public func completeMultipartUpload(key: String, uploadId: String, parts: [CompletedPart]) async throws {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        
+        // Build XML body
+        var xmlParts = "<CompleteMultipartUpload>"
+        for part in parts.sorted(by: { $0.partNumber < $1.partNumber }) {
+            xmlParts += "<Part><PartNumber>\(part.partNumber)</PartNumber><ETag>\(part.etag)</ETag></Part>"
+        }
+        xmlParts += "</CompleteMultipartUpload>"
+        
+        let bodyData = Data(xmlParts.utf8)
+        let bodyHash = bodyData.sha256()
+        
+        let request = try await buildRequest(
+            method: "POST",
+            path: path,
+            queryItems: [URLQueryItem(name: "uploadId", value: uploadId)],
+            headers: ["Content-Type": "application/xml"],
+            body: .bytes(ByteBuffer(data: bodyData)),
+            bodyHash: bodyHash
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(60))
+        
+        guard response.status == .ok else {
+            throw try await handleErrorResponse(response)
+        }
+    }
+    
+    /// Aborts a multipart upload.
+    ///
+    /// - Parameters:
+    ///   - key: The object key.
+    ///   - uploadId: The upload ID to abort.
+    public func abortMultipartUpload(key: String, uploadId: String) async throws {
+        guard bucket != nil else { throw S3Error.bucketNotFound }
+        
+        let path = key.hasPrefix("/") ? key : "/" + key
+        
+        let request = try await buildRequest(
+            method: "DELETE",
+            path: path,
+            queryItems: [URLQueryItem(name: "uploadId", value: uploadId)]
+        )
+        
+        let response = try await httpClient.execute(request, timeout: .seconds(30))
+        
+        guard response.status == .noContent || response.status == .ok else {
+            throw try await handleErrorResponse(response)
+        }
+    }
+    
+    /// Uploads a large object using multipart upload.
+    ///
+    /// - Parameters:
+    ///   - key: The object key.
+    ///   - data: The data to upload.
+    ///   - partSize: Size of each part (minimum 5MB, default 10MB).
+    ///   - progress: Optional progress callback.
+    public func putObjectMultipart(
+        key: String,
+        data: Data,
+        partSize: Int = 10 * 1024 * 1024,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
+        let uploadId = try await initiateMultipartUpload(key: key)
+        
+        var completedParts: [CompletedPart] = []
+        var offset = 0
+        var partNumber = 1
+        let totalSize = data.count
+        
+        do {
+            while offset < totalSize {
+                let end = min(offset + partSize, totalSize)
+                let partData = data[offset..<end]
+                
+                let etag = try await uploadPart(
+                    key: key,
+                    uploadId: uploadId,
+                    partNumber: partNumber,
+                    data: Data(partData)
+                )
+                
+                completedParts.append(CompletedPart(partNumber: partNumber, etag: etag))
+                
+                offset = end
+                partNumber += 1
+                
+                progress?(Double(offset) / Double(totalSize))
+            }
+            
+            try await completeMultipartUpload(key: key, uploadId: uploadId, parts: completedParts)
+        } catch {
+            // Abort on failure
+            try? await abortMultipartUpload(key: key, uploadId: uploadId)
+            throw error
         }
     }
 }

@@ -2,10 +2,21 @@ import Foundation
 import Crypto
 import NIO
 
-public enum StreamingEncryptionError: Error {
+public enum StreamingEncryptionError: Error, LocalizedError {
     case encryptionFailed
     case decryptionFailed
     case invalidData
+    
+    public var errorDescription: String? {
+        switch self {
+        case .encryptionFailed:
+            return "❌ Encryption failed. The data could not be encrypted."
+        case .decryptionFailed:
+            return "❌ Decryption failed. The data may be corrupted or the key is incorrect."
+        case .invalidData:
+            return "❌ Invalid encrypted data format."
+        }
+    }
 }
 
 /// Helper for streaming AES-GCM encryption/decryption.
@@ -16,11 +27,58 @@ public enum StreamingEncryptionError: Error {
 /// Each Encrypted Chunk Structure:
 /// ```
 /// | Nonce (12 bytes) | Ciphertext (chunkSize bytes) | Tag (16 bytes) |
+/// ```
+///
+/// The overhead per chunk is 28 bytes (12 nonce + 16 tag).
 // MARK: - Generic Streaming Encryption
 
 public struct StreamingEncryption {
 
-    public static let chunkSize = 1024 * 1024 
+    /// Default chunk size (1MB).
+    public static let chunkSize = 1024 * 1024
+    
+    /// Minimum chunk size (256KB).
+    public static let minChunkSize = 256 * 1024
+    
+    /// Maximum chunk size (16MB).
+    public static let maxChunkSize = 16 * 1024 * 1024
+    
+    /// Encryption overhead per chunk (nonce + tag).
+    public static let overhead = 28
+    
+    /// Calculates the optimal chunk size based on file size.
+    ///
+    /// - Parameter fileSize: The total file size in bytes.
+    /// - Returns: The recommended chunk size.
+    public static func optimalChunkSize(forFileSize fileSize: Int64) -> Int {
+        switch fileSize {
+        case ..<(10 * 1024 * 1024):           // < 10MB
+            return minChunkSize                // 256KB chunks
+        case ..<(100 * 1024 * 1024):          // < 100MB
+            return chunkSize                   // 1MB chunks
+        case ..<(1024 * 1024 * 1024):         // < 1GB
+            return 5 * 1024 * 1024             // 5MB chunks
+        default:                               // >= 1GB
+            return maxChunkSize                // 16MB chunks
+        }
+    }
+    
+    /// Calculates the encrypted size for a given plaintext size.
+    ///
+    /// - Parameters:
+    ///   - plaintextSize: The size of the plaintext data.
+    ///   - chunkSize: The chunk size being used.
+    /// - Returns: The total encrypted size including overhead.
+    public static func encryptedSize(plaintextSize: Int64, chunkSize: Int = StreamingEncryption.chunkSize) -> Int64 {
+        let fullChunks = plaintextSize / Int64(chunkSize)
+        let remainder = plaintextSize % Int64(chunkSize)
+        
+        var totalSize = fullChunks * Int64(chunkSize + overhead)
+        if remainder > 0 {
+            totalSize += remainder + Int64(overhead)
+        }
+        return totalSize
+    }
     
     // Wrapper for SymmetricKey to allow Sendable conformance
     struct SendableKey: @unchecked Sendable {

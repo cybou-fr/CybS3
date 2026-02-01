@@ -4,20 +4,6 @@ import Crypto
 import SwiftBIP39
 import CybS3Lib
 
-// Common models (VaultConfig) are now in Services.swift potentially?
-// Or we need to redefine them or fix visibility.
-// Services.swift defined `VaultConfig` inside `EncryptedConfig` usage.
-// Let's check Services.swift content again.
-// Services.swift uses `VaultConfig` but didn't define it? 
-// No, I defined `struct EncryptedConfig` which uses `[VaultConfig]`.
-// I MUST ensure VaultConfig is defined.
-// In the previous step I removed `Vaults.swift` logic but wait...
-// `Services.swift` assumed `VaultConfig` exists.
-// `Vaults.swift` defines `VaultConfig`?
-// If `Vaults.swift` still compiles, `VaultConfig` is there.
-// But I need to allow `Services.swift` to see it.
-// Structs in same module are visible.
-
 extension CybS3 {
     struct Vaults: AsyncParsableCommand {
         static let configuration = CommandConfiguration(

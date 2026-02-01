@@ -5,11 +5,6 @@ import SwiftBIP39
 
 // MARK: - Models
 
-// MARK: - Models
-
-/// Stores application-wide defaults.
-// MARK: - Models
-
 /// Stores application-wide defaults.
 public struct AppSettings: Codable {
     /// Default AWS Region.
@@ -79,10 +74,27 @@ public struct EncryptedConfig: Codable {
     }
 }
 
-public enum StorageError: Error {
+public enum StorageError: Error, LocalizedError {
     case configNotFound
     case oldVaultsFoundButMigrationFailed
     case decryptionFailed
+    case integrityCheckFailed
+    case unsupportedVersion(Int)
+    
+    public var errorDescription: String? {
+        switch self {
+        case .configNotFound:
+            return "❌ Configuration not found. Run 'cybs3 login' to create one."
+        case .oldVaultsFoundButMigrationFailed:
+            return "❌ Legacy configuration migration failed. Ensure you provided the correct mnemonic."
+        case .decryptionFailed:
+            return "❌ Decryption failed. The mnemonic may be incorrect."
+        case .integrityCheckFailed:
+            return "❌ Configuration integrity check failed. The file may be corrupted."
+        case .unsupportedVersion(let version):
+            return "❌ Unsupported configuration version (\(version)). Please update CybS3."
+        }
+    }
 }
 
 // MARK: - Storage Service
@@ -91,6 +103,8 @@ public enum StorageError: Error {
 ///
 /// The configuration is stored in `~/.cybs3/config.enc`.
 /// It is encrypted using a Master Key derived from the user's Mnemonic.
+///
+/// File format (v2): HMAC-SHA256 (32 bytes) || AES-GCM encrypted JSON
 public struct StorageService {
     private static let configDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cybs3")
@@ -102,6 +116,12 @@ public struct StorageService {
         .appendingPathComponent(".cybs3.json")
     private static let legacyVaultsPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cybs3.vaults")
+    
+    /// Current config format version
+    private static let currentVersion = 2
+    
+    /// HMAC size in bytes
+    private static let hmacSize = 32
 
     /// Loads the configuration, attempting migration if necessary.
     ///
@@ -135,26 +155,76 @@ public struct StorageService {
             return (config, newDataKey)
         }
         
-        // 3. Normal Load
-        let encryptedData = try Data(contentsOf: configPath)
+        // 3. Normal Load with integrity check
+        let fileData = try Data(contentsOf: configPath)
         let masterKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
         
-        let decryptedData = try EncryptionService.decrypt(data: encryptedData, key: masterKey)
-        let config = try JSONDecoder().decode(EncryptedConfig.self, from: decryptedData)
+        // Check if file has HMAC prefix (v2 format)
+        let encryptedData: Data
+        if fileData.count > hmacSize {
+            let storedHmac = fileData.prefix(hmacSize)
+            let payload = fileData.dropFirst(hmacSize)
+            
+            // Verify HMAC
+            let computedHmac = try computeHMAC(data: Data(payload), key: masterKey)
+            if storedHmac != computedHmac {
+                // Try v1 format (no HMAC) for backward compatibility
+                encryptedData = fileData
+            } else {
+                encryptedData = Data(payload)
+            }
+        } else {
+            encryptedData = fileData
+        }
         
-        let dataKey = SymmetricKey(data: config.dataKey)
-        return (config, dataKey)
+        do {
+            let decryptedData = try EncryptionService.decrypt(data: encryptedData, key: masterKey)
+            var config = try JSONDecoder().decode(EncryptedConfig.self, from: decryptedData)
+            
+            // Check version and migrate if needed
+            if config.version > currentVersion {
+                throw StorageError.unsupportedVersion(config.version)
+            }
+            
+            // Upgrade config if it's an older version
+            if config.version < currentVersion {
+                config.version = currentVersion
+                try save(config, mnemonic: mnemonic)
+            }
+            
+            let dataKey = SymmetricKey(data: config.dataKey)
+            return (config, dataKey)
+        } catch is DecodingError {
+            throw StorageError.decryptionFailed
+        }
     }
     
-    /// Encrypts and saves the configuration to disk.
+    /// Computes HMAC-SHA256 for integrity verification.
+    private static func computeHMAC(data: Data, key: SymmetricKey) throws -> Data {
+        let hmac = HMAC<SHA256>.authenticationCode(for: data, using: key)
+        return Data(hmac)
+    }
+    
+    /// Encrypts and saves the configuration to disk with integrity protection.
     ///
     /// - Parameters:
     ///   - config: The configuration object to save.
     ///   - mnemonic: The mnemonic used to encrypt the file.
     public static func save(_ config: EncryptedConfig, mnemonic: [String]) throws {
         let masterKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
-        let data = try JSONEncoder().encode(config)
+        
+        var configToSave = config
+        configToSave.version = currentVersion
+        
+        let data = try JSONEncoder().encode(configToSave)
         let encryptedData = try EncryptionService.encrypt(data: data, key: masterKey)
+        
+        // Compute HMAC for integrity
+        let hmac = try computeHMAC(data: encryptedData, key: masterKey)
+        
+        // Write: HMAC || EncryptedData
+        var fileData = hmac
+        fileData.append(encryptedData)
         
         if !FileManager.default.fileExists(atPath: configPath.path) {
              _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -162,7 +232,7 @@ public struct StorageService {
              try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
         }
         
-        try encryptedData.write(to: configPath)
+        try fileData.write(to: configPath)
     }
     
     /// Rotates the Master Key (Mnemonic) while preserving the internal Data Key.
@@ -280,11 +350,87 @@ public struct InteractionService {
         }
         return bucket
     }
+    
+    /// Prompts the user to select a vault from a list.
+    ///
+    /// - Parameter vaults: The available vaults.
+    /// - Returns: The selected vault, or nil if cancelled.
+    public static func promptForVault(vaults: [VaultConfig]) -> VaultConfig? {
+        guard !vaults.isEmpty else {
+            print("❌ No vaults configured. Run 'cybs3 vaults add --name <name>' to create one.")
+            return nil
+        }
+        
+        print("\n📂 Select a vault:")
+        print(String(repeating: "-", count: 40))
+        
+        for (index, vault) in vaults.enumerated() {
+            let bucketInfo = vault.bucket.map { " (\($0))" } ?? ""
+            print("  \(index + 1). \(vault.name)\(bucketInfo)")
+            print("     └─ \(vault.endpoint)")
+        }
+        
+        print(String(repeating: "-", count: 40))
+        print("Enter number (or 'q' to cancel): ", terminator: "")
+        fflush(stdout)
+        
+        guard let input = readLine()?.trimmingCharacters(in: .whitespaces) else {
+            return nil
+        }
+        
+        if input.lowercased() == "q" {
+            return nil
+        }
+        
+        guard let index = Int(input), index >= 1, index <= vaults.count else {
+            print("❌ Invalid selection.")
+            return nil
+        }
+        
+        return vaults[index - 1]
+    }
+    
+    /// Prompts for confirmation.
+    ///
+    /// - Parameters:
+    ///   - message: The confirmation message.
+    ///   - defaultValue: The default value if user just presses Enter.
+    /// - Returns: True if confirmed, false otherwise.
+    public static func confirm(message: String, defaultValue: Bool = false) -> Bool {
+        let hint = defaultValue ? "[Y/n]" : "[y/N]"
+        print("\(message) \(hint) ", terminator: "")
+        fflush(stdout)
+        
+        guard let input = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() else {
+            return defaultValue
+        }
+        
+        if input.isEmpty {
+            return defaultValue
+        }
+        
+        return input == "y" || input == "yes"
+    }
 }
 
-public enum InteractionError: Error {
+public enum InteractionError: Error, LocalizedError {
     case mnemonicRequired
     case bucketRequired
+    case invalidMnemonic(String)
+    case userCancelled
+    
+    public var errorDescription: String? {
+        switch self {
+        case .mnemonicRequired:
+            return "❌ Mnemonic is required. Run 'cybs3 keys create' to generate one."
+        case .bucketRequired:
+            return "❌ Bucket name is required. Use --bucket or set a default with 'cybs3 config --bucket <name>'."
+        case .invalidMnemonic(let reason):
+            return "❌ Invalid mnemonic: \(reason)"
+        case .userCancelled:
+            return "Operation cancelled by user."
+        }
+    }
 }
 
 // MARK: - Encryption Service
