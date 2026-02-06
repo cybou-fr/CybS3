@@ -1,10 +1,12 @@
 import Foundation
+#if os(macOS)
 import Security
 import LocalAuthentication
+#endif
 
 public enum KeychainError: Error, LocalizedError {
     case duplicateEntry
-    case unknown(OSStatus)
+    case unknown(Int)
     case itemNotFound
     case accessControlCreationFailed
     case biometricNotAvailable
@@ -36,7 +38,8 @@ public enum KeychainSecurityLevel {
 public struct KeychainService {
     private static let serviceName = "cybs3-cli"
     private static let accountName = "default"
-
+    
+    #if os(macOS)
     /// Saves the mnemonic to the Keychain with configurable security level.
     ///
     /// - Parameters:
@@ -88,7 +91,7 @@ public struct KeychainService {
         let status = SecItemAdd(query as CFDictionary, nil)
         
         guard status == errSecSuccess else {
-            throw KeychainError.unknown(status)
+            throw KeychainError.unknown(Int(status))
         }
     }
 
@@ -145,7 +148,48 @@ public struct KeychainService {
         let status = SecItemDelete(query as CFDictionary)
         
         guard status == errSecSuccess || status == errSecItemNotFound else {
-           throw KeychainError.unknown(status)
+           throw KeychainError.unknown(Int(status))
         }
     }
+    #else
+    // Linux implementation using file-based storage
+    private static var keychainFileURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".cybs3").appendingPathComponent("mnemonic.txt")
+    }
+    
+    /// Saves the mnemonic to a file (Linux).
+    public static func save(mnemonic: [String], securityLevel: KeychainSecurityLevel = .standard) throws {
+        let mnemonicString = mnemonic.joined(separator: " ")
+        
+        // Create directory if needed
+        let dir = keychainFileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        
+        // Write to file with restricted permissions
+        try mnemonicString.write(to: keychainFileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keychainFileURL.path)
+    }
+    
+    /// Loads the mnemonic from file (Linux).
+    public static func load(promptMessage: String? = nil) -> [String]? {
+        guard let data = try? Data(contentsOf: keychainFileURL),
+              let mnemonicString = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return mnemonicString.components(separatedBy: " ")
+    }
+    
+    /// Checks if mnemonic file exists (Linux).
+    public static func exists() -> Bool {
+        return FileManager.default.fileExists(atPath: keychainFileURL.path)
+    }
+    
+    /// Deletes the mnemonic file (Linux).
+    public static func delete() throws {
+        if exists() {
+            try FileManager.default.removeItem(at: keychainFileURL)
+        }
+    }
+    #endif
 }

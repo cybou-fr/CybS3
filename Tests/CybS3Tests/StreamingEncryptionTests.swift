@@ -1,5 +1,5 @@
 import XCTest
-import Crypto
+@preconcurrency import Crypto
 import NIO
 @testable import CybS3Lib
 
@@ -506,13 +506,14 @@ final class StreamingEncryptionTests: XCTestCase {
     
     func testConcurrentEncryptions() async throws {
         // Test that multiple encryptions can run without interference
-        let key = SymmetricKey(size: .bits256)
+        let key1 = SymmetricKey(size: .bits256)
+        let key2 = SymmetricKey(size: .bits256)
         let testData1 = Data(repeating: 0xAA, count: 1024)
         let testData2 = Data(repeating: 0xBB, count: 2048)
         
         async let result1: [Data] = {
             let stream = MockStream(data: testData1, chunkSize: StreamingEncryption.chunkSize)
-            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key)
+            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key1)
             var chunks: [Data] = []
             for try await chunk in encrypted {
                 chunks.append(chunk)
@@ -522,7 +523,7 @@ final class StreamingEncryptionTests: XCTestCase {
         
         async let result2: [Data] = {
             let stream = MockStream(data: testData2, chunkSize: StreamingEncryption.chunkSize)
-            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key)
+            let encrypted = StreamingEncryption.EncryptedStream(upstream: stream, key: key2)
             var chunks: [Data] = []
             for try await chunk in encrypted {
                 chunks.append(chunk)
@@ -533,8 +534,8 @@ final class StreamingEncryptionTests: XCTestCase {
         let (chunks1, chunks2) = try await (result1, result2)
         
         // Decrypt both
-        let decrypted1 = try await decryptChunks(chunks1, key: key)
-        let decrypted2 = try await decryptChunks(chunks2, key: key)
+        let decrypted1 = try await decryptChunks(chunks1, key: key1)
+        let decrypted2 = try await decryptChunks(chunks2, key: key2)
         
         XCTAssertEqual(decrypted1, testData1)
         XCTAssertEqual(decrypted2, testData2)

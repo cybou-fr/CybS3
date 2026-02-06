@@ -1,4 +1,9 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#else
+import Glibc
+#endif
 import ArgumentParser
 import Crypto
 import SwiftBIP39
@@ -381,7 +386,6 @@ public struct InteractionService {
         
         print(String(repeating: "-", count: 40))
         print("Enter number (or 'q' to cancel): ", terminator: "")
-        fflush(stdout)
         
         guard let input = readLine()?.trimmingCharacters(in: .whitespaces) else {
             return nil
@@ -408,7 +412,6 @@ public struct InteractionService {
     public static func confirm(message: String, defaultValue: Bool = false) -> Bool {
         let hint = defaultValue ? "[Y/n]" : "[y/N]"
         print("\(message) \(hint) ", terminator: "")
-        fflush(stdout)
         
         guard let input = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() else {
             return defaultValue

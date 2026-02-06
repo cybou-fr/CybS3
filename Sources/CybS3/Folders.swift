@@ -1,6 +1,6 @@
 import ArgumentParser
 import AsyncHTTPClient
-import Crypto
+@preconcurrency import Crypto
 import CybS3Lib
 import Foundation
 import NIO
@@ -199,7 +199,6 @@ struct Folders: AsyncParsableCommand {
 
                     if !json {
                         print("\r[\(uploadedCount + 1)/\(totalCount)] Uploading: \(file.relativePath)", terminator: "")
-                        fflush(stdout)
                     }
 
                     try await client.putObject(key: remoteKey, stream: uploadStream, length: encryptedSize)
@@ -359,7 +358,6 @@ struct Folders: AsyncParsableCommand {
                     // Download and decrypt
                     if !json {
                         print("\r[\(downloadedCount + skippedCount + 1)/\(totalCount)] Downloading: \(relativePath)", terminator: "")
-                        fflush(stdout)
                     }
 
                     _ = FileManager.default.createFile(atPath: localFilePath, contents: nil)
@@ -716,7 +714,6 @@ struct Folders: AsyncParsableCommand {
                         let encryptedSize = StreamingEncryption.encryptedSize(plaintextSize: file.size)
 
                         print("\r  Uploading: \(file.relativePath)", terminator: "")
-                        fflush(stdout)
 
                         try await client.putObject(key: remoteKey, stream: uploadStream, length: encryptedSize)
                         uploadedCount += 1

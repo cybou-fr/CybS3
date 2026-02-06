@@ -483,7 +483,6 @@ struct CybS3: AsyncParsableCommand {
                         // Indeterminate progress if size unknown
                         let mb = Double(totalBytes) / 1024 / 1024
                         print(String(format: "\rDownloaded: %.2f MB", mb), terminator: "")
-                        fflush(stdout)
                     }
 
                     if #available(macOS 10.15.4, *) {

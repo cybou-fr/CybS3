@@ -181,14 +181,13 @@ public struct FolderService {
         var hasher = SHA256()
         let bufferSize = 1024 * 1024 // 1MB chunks
         
-        while autoreleasepool(invoking: {
+        while true {
             let data = fileHandle.readData(ofLength: bufferSize)
             if data.isEmpty {
-                return false
+                break
             }
             hasher.update(data: data)
-            return true
-        }) {}
+        }
         
         let digest = hasher.finalize()
         return digest.map { String(format: "%02hhx", $0) }.joined()
@@ -315,8 +314,6 @@ public actor FileWatcher {
     private let watchPath: URL
     private let excludePatterns: [String]
     private var isWatching = false
-    private var dispatchSource: DispatchSourceFileSystemObject?
-    private var fileDescriptor: Int32 = -1
     private var lastKnownFiles: [String: Date] = [:]
     private let pollInterval: TimeInterval
     
@@ -356,12 +353,6 @@ public actor FileWatcher {
     /// Stops watching for changes.
     public func stop() {
         isWatching = false
-        if fileDescriptor >= 0 {
-            close(fileDescriptor)
-            fileDescriptor = -1
-        }
-        dispatchSource?.cancel()
-        dispatchSource = nil
     }
     
     /// Scans the directory and updates the known files dictionary.

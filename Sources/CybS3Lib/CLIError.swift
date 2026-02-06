@@ -1,4 +1,9 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#else
+import Glibc
+#endif
 
 // MARK: - CLI Error Wrapper
 
@@ -193,9 +198,11 @@ public enum CLIError: Error, LocalizedError {
     
     /// Prints the error with its suggestion to stderr.
     public func printError() {
-        fputs("\(formattedMessage)\n", stderr)
+        let msg = "\(formattedMessage)\n"
+        FileHandle.standardError.write(Data(msg.utf8))
         if let suggestion = suggestion {
-            fputs("\(suggestion)\n", stderr)
+            let sug = "\(suggestion)\n"
+            FileHandle.standardError.write(Data(sug.utf8))
         }
     }
 }

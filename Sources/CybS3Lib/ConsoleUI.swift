@@ -1,4 +1,9 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#else
+import Glibc
+#endif
 
 public struct ConsoleUI {
     
@@ -73,7 +78,8 @@ public struct ConsoleUI {
     
     /// Prints an error message to stderr.
     public static func error(_ message: String) {
-        fputs("\(StatusIcon.error.symbol) \(colored(message, .red))\n", stderr)
+        let msg = "\(StatusIcon.error.symbol) \(colored(message, .red))\n"
+        FileHandle.standardError.write(Data(msg.utf8))
     }
     
     /// Prints a warning message.
@@ -253,7 +259,6 @@ public struct ConsoleUI {
             }
             
             print(line, terminator: "")
-            fflush(stdout)
         }
     }
     
@@ -294,7 +299,6 @@ public struct ConsoleUI {
             let frame = frames[frameIndex % frames.count]
             frameIndex += 1
             print("\r\(ConsoleUI.colored(frame, .cyan)) \(message)", terminator: "")
-            fflush(stdout)
         }
     }
 }

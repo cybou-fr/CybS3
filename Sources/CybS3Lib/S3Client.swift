@@ -74,10 +74,16 @@ public enum S3Error: Error, LocalizedError {
 struct S3ErrorParser {
     /// Parses an S3 XML error response and returns an appropriate S3Error.
     static func parse(data: Data, status: Int) -> S3Error {
+        guard !data.isEmpty else {
+            return .requestFailed(status: status, code: nil, message: "Empty response")
+        }
         do {
             let xml = try XMLDocument(data: data)
-            let code = try xml.nodes(forXPath: "//Error/Code").first?.stringValue
-            let message = try xml.nodes(forXPath: "//Error/Message").first?.stringValue
+            guard let root = try? xml.rootElement() else {
+                throw NSError(domain: "XML", code: 0, userInfo: nil)
+            }
+            let code = (try? root.nodes(forXPath: "Code").first?.stringValue) ?? (try? xml.nodes(forXPath: "//Error/Code").first?.stringValue)
+            let message = (try? root.nodes(forXPath: "Message").first?.stringValue) ?? (try? xml.nodes(forXPath: "//Error/Message").first?.stringValue)
             
             // Map common S3 error codes to specific errors
             switch code {
