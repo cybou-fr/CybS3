@@ -482,10 +482,9 @@ public actor S3Client {
                 queryItems.append(URLQueryItem(name: "delimiter", value: delimiter))
             }
             queryItems.append(URLQueryItem(name: "max-keys", value: String(batchSize)))
-            queryItems.append(URLQueryItem(name: "list-type", value: "2"))
             
             if let token = continuationToken {
-                queryItems.append(URLQueryItem(name: "continuation-token", value: token))
+                queryItems.append(URLQueryItem(name: "marker", value: token))
             }
             
             let request = try await buildRequest(
@@ -540,7 +539,7 @@ public actor S3Client {
             if let truncatedNode = try? xml.nodes(forXPath: "//ListBucketResult/IsTruncated").first,
                truncatedNode.stringValue?.lowercased() == "true" {
                 isTruncated = true
-                if let nextTokenNode = try? xml.nodes(forXPath: "//ListBucketResult/NextContinuationToken").first {
+                if let nextTokenNode = try? xml.nodes(forXPath: "//ListBucketResult/NextMarker").first {
                     continuationToken = nextTokenNode.stringValue
                 } else {
                     isTruncated = false
