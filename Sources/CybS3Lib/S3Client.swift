@@ -292,9 +292,23 @@ public actor S3Client {
     private let endpoint: S3Endpoint
     private let bucket: String?
     private let region: String
-    private let httpClient: HTTPClient
+    private lazy var httpClient: HTTPClient = {
+        // Configure HTTP client with connection pooling
+        var httpConfig = HTTPClient.Configuration()
+        httpConfig.connectionPool = HTTPClient.Configuration.ConnectionPool(
+            idleTimeout: .seconds(Int64(configuration.connectionIdleTimeout)),
+            concurrentHTTP1ConnectionsPerHostSoftLimit: configuration.maxConnectionsPerHost
+        )
+        httpConfig.timeout = HTTPClient.Configuration.Timeout(
+            connect: .seconds(30),
+            read: .seconds(Int64(configuration.requestTimeout))
+        )
+        
+        return HTTPClient(eventLoopGroupProvider: .shared(MultiThreadedEventLoopGroup(numberOfThreads: 1)), configuration: httpConfig)
+    }()
     private let signer: AWSV4Signer
     private let logger: Logger
+    private let configuration: Configuration
     
     /// Configuration options for the S3 client.
     public struct Configuration: Sendable {
@@ -351,19 +365,8 @@ public actor S3Client {
         self.endpoint = endpoint
         self.bucket = bucket?.isEmpty == true ? nil : bucket  // Normalize empty string to nil
         self.region = region.isEmpty ? "us-east-1" : region
+        self.configuration = configuration
         
-        // Configure HTTP client with connection pooling
-        var httpConfig = HTTPClient.Configuration()
-        httpConfig.connectionPool = HTTPClient.Configuration.ConnectionPool(
-            idleTimeout: .seconds(Int64(configuration.connectionIdleTimeout)),
-            concurrentHTTP1ConnectionsPerHostSoftLimit: configuration.maxConnectionsPerHost
-        )
-        httpConfig.timeout = HTTPClient.Configuration.Timeout(
-            connect: .seconds(30),
-            read: .seconds(Int64(configuration.requestTimeout))
-        )
-        
-        self.httpClient = HTTPClient(eventLoopGroupProvider: .singleton, configuration: httpConfig)
         self.signer = AWSV4Signer(accessKey: accessKey, secretKey: secretKey, region: region)
         self.logger = Logger(label: "com.cybs3.client")
     }
@@ -474,7 +477,9 @@ public actor S3Client {
         let batchSize = 1000
         
         while isTruncated {
-            var queryItems: [URLQueryItem] = []
+            var queryItems: [URLQueryItem] = [
+                URLQueryItem(name: "list-type", value: "2")
+            ]
             if let prefix = prefix {
                 queryItems.append(URLQueryItem(name: "prefix", value: prefix))
             }
@@ -484,7 +489,7 @@ public actor S3Client {
             queryItems.append(URLQueryItem(name: "max-keys", value: String(batchSize)))
             
             if let token = continuationToken {
-                queryItems.append(URLQueryItem(name: "marker", value: token))
+                queryItems.append(URLQueryItem(name: "continuation-token", value: token))
             }
             
             let request = try await buildRequest(
@@ -502,16 +507,17 @@ public actor S3Client {
             let data = Data(buffer: body)
             let xml = try XMLDocument(data: data)
             
-            let objectNodes = try xml.nodes(forXPath: "//ListBucketResult/Contents")
+            let objectNodes = try xml.nodes(forXPath: "//*[local-name()='Contents']")
             for node in objectNodes {
-                guard let key = (try? node.nodes(forXPath: "Key").first)?.stringValue,
-                      let lastModified = (try? node.nodes(forXPath: "LastModified").first)?.stringValue,
-                      let sizeString = (try? node.nodes(forXPath: "Size").first)?.stringValue,
+                guard let key = (try? node.nodes(forXPath: "*[local-name()='Key']").first)?.stringValue,
+                      let lastModified = (try? node.nodes(forXPath: "*[local-name()='LastModified']").first)?.stringValue,
+                      let sizeString = (try? node.nodes(forXPath: "*[local-name()='Size']").first)?.stringValue,
                       let size = Int(sizeString) else {
+                    print("DEBUG: Failed to parse object fields")
                     continue
                 }
                 
-                let etag = (try? node.nodes(forXPath: "ETag").first)?.stringValue
+                let etag = (try? node.nodes(forXPath: "*[local-name()='ETag']").first)?.stringValue
                 
                 objects.append(S3Object(
                     key: key,
@@ -522,7 +528,7 @@ public actor S3Client {
                 ))
             }
             
-            let prefixNodes = try xml.nodes(forXPath: "//ListBucketResult/CommonPrefixes/Prefix")
+            let prefixNodes = try xml.nodes(forXPath: "//*[local-name()='CommonPrefixes']/*[local-name()='Prefix']")
             for node in prefixNodes {
                 guard let prefix = node.stringValue else { continue }
                 if !objects.contains(where: { $0.key == prefix && $0.isDirectory }) {
@@ -536,10 +542,10 @@ public actor S3Client {
                 }
             }
             
-            if let truncatedNode = try? xml.nodes(forXPath: "//ListBucketResult/IsTruncated").first,
+            if let truncatedNode = try? xml.nodes(forXPath: "//*[local-name()='IsTruncated']").first,
                truncatedNode.stringValue?.lowercased() == "true" {
                 isTruncated = true
-                if let nextTokenNode = try? xml.nodes(forXPath: "//ListBucketResult/NextMarker").first {
+                if let nextTokenNode = try? xml.nodes(forXPath: "//*[local-name()='NextContinuationToken']").first {
                     continuationToken = nextTokenNode.stringValue
                 } else {
                     isTruncated = false
@@ -671,11 +677,12 @@ public actor S3Client {
     public func createBucket(name: String) async throws {
         // Location constraint
         // FIX: strict check for us-east-1 to avoid errors on AWS S3
+        print("DEBUG: Creating bucket '\(name)' in region '\(region)'")
         let body: HTTPClientRequest.Body?
         let bodyHash: String
         let xmlStr: String?
         
-        if region != "us-east-1" {
+        if region != "us-east-1" && region != "garage" {
             xmlStr = """
             <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
                 <LocationConstraint>\(region)</LocationConstraint>
@@ -684,16 +691,29 @@ public actor S3Client {
             let data = Data(xmlStr!.utf8)
             bodyHash = data.sha256()
             body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
+            print("DEBUG: Sending LocationConstraint XML for region \(region)")
+        } else if region == "garage" {
+            // For garage, send empty CreateBucketConfiguration with xmlns
+            xmlStr = """
+            <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></CreateBucketConfiguration>
+            """
+            let data = Data(xmlStr!.utf8)
+            bodyHash = data.sha256()
+            body = HTTPClientRequest.Body.bytes(ByteBuffer(data: data))
+            print("DEBUG: Sending empty CreateBucketConfiguration XML for garage")
         } else {
              // For us-east-1, no body allowed for CreateBucket
             xmlStr = nil
             body = nil
+            print("DEBUG: Not sending LocationConstraint XML for region \(region)")
             bodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // Empty hash
         }
         
         let request = try await buildRequest(
             method: "PUT",
             path: "/",
+            queryItems: [],
+            headers: [:],
             body: body,
             bodyHash: bodyHash
         )

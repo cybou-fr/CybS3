@@ -45,7 +45,17 @@ final class IntegrationTests: XCTestCase {
     
     /// Creates an S3Client with the provided credentials
     func createClient(creds: TestCredentials, bucket: String? = nil) -> S3Client {
-        let endpoint = S3Endpoint(host: creds.endpoint, port: 443, useSSL: true)
+        // Parse the endpoint URL to extract host, or treat as hostname if no scheme
+        let endpoint: S3Endpoint
+        if let url = URL(string: creds.endpoint), let host = url.host {
+            let useSSL = url.scheme == "https"
+            let port = url.port ?? (useSSL ? 443 : 80)
+            endpoint = S3Endpoint(host: host, port: port, useSSL: useSSL)
+        } else {
+            // Assume it's just a hostname, use HTTPS
+            endpoint = S3Endpoint(host: creds.endpoint, port: 443, useSSL: true)
+        }
+        
         return S3Client(
             endpoint: endpoint,
             accessKey: creds.accessKey,
@@ -155,6 +165,8 @@ final class IntegrationTests: XCTestCase {
 
         // 4. List Objects
         print("4️⃣  Listing objects in bucket")
+        // Add small delay for eventual consistency
+        try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
         do {
             let objects = try await client.listObjects(prefix: nil, delimiter: nil)
             XCTAssertFalse(objects.isEmpty, "Bucket should contain at least one object")
@@ -366,6 +378,9 @@ final class IntegrationTests: XCTestCase {
             }
             print("   ✅ Created \(files.count) files")
             
+            // Add small delay for eventual consistency
+            try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+            
             // List all objects
             let allObjects = try await client.listObjects(prefix: nil, delimiter: nil)
             XCTAssertEqual(allObjects.count, files.count, "Should have all files")
@@ -409,6 +424,13 @@ final class IntegrationTests: XCTestCase {
         
         let bucketName = generateBucketName()
         let client = createClient(creds: creds, bucket: bucketName)
+        
+        // Ensure client is always shut down
+        defer {
+            Task {
+                try? await client.shutdown()
+            }
+        }
         
         try await client.createBucket(name: bucketName)
         
@@ -474,6 +496,9 @@ final class IntegrationTests: XCTestCase {
                 print("   ⚠️  Failed to create '\(file)': \(error)")
             }
         }
+        
+        // Add small delay for eventual consistency
+        try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
         
         // Verify files exist
         let objects = try await client.listObjects(prefix: nil, delimiter: nil)
