@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "CybS3",
     // Supports macOS 12.0+ and Linux
-    // platforms: [.macOS(.v12)],
+    platforms: [.macOS(.v12)],
     products: [
         .executable(name: "cybs3", targets: ["CybS3"])
     ],
@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.5.0"),
         .package(url: "https://github.com/cybou-fr/SwiftBIP39.git", branch: "main"),
+        .package(url: "https://github.com/typelift/SwiftCheck.git", from: "0.12.0"),
     ],
     targets: [
         .target(
@@ -37,7 +38,10 @@ let package = Package(
         ),
         .testTarget(
             name: "CybS3Tests",
-            dependencies: ["CybS3Lib"]
+            dependencies: [
+                "CybS3Lib",
+                .product(name: "SwiftCheck", package: "SwiftCheck")
+            ]
         ),
     ]
 )

@@ -6,7 +6,7 @@ import Crypto
 
 @testable import CybS3Lib
 
-final class IntegrationTests: XCTestCase {
+final class EnvironmentIntegrationTests: XCTestCase {
 
     struct TestCredentials {
         let endpoint: String

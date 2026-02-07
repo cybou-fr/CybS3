@@ -201,7 +201,7 @@ public struct ConsoleUI {
         private var lastUpdate: Date
         private var bytesProcessed: Int64 = 0
         private let showSpeed: Bool
-        private let lock = NSLock()
+        private let lock = CrossPlatformLock()
         
         public init(title: String, width: Int = 40, showSpeed: Bool = true) {
             self.title = title

@@ -249,6 +249,34 @@ public struct StorageService {
         try fileData.write(to: configPath)
     }
     
+    /// Encrypts and saves the configuration to disk using a provided data key.
+    ///
+    /// - Parameters:
+    ///   - config: The configuration object to save.
+    ///   - dataKey: The symmetric key to use for encryption.
+    public static func save(config: EncryptedConfig, dataKey: SymmetricKey) throws {
+        var configToSave = config
+        configToSave.version = currentVersion
+        
+        let data = try JSONEncoder().encode(configToSave)
+        let encryptedData = try EncryptionService.encrypt(data: data, key: dataKey)
+        
+        // Compute HMAC for integrity
+        let hmac = try computeHMAC(data: encryptedData, key: dataKey)
+        
+        // Write: HMAC || EncryptedData
+        var fileData = hmac
+        fileData.append(encryptedData)
+        
+        if !FileManager.default.fileExists(atPath: configPath.path) {
+             _ = FileManager.default.createFile(atPath: configPath.path, contents: nil, attributes: [.posixPermissions: secureFilePermissions])
+        } else {
+             try FileManager.default.setAttributes([.posixPermissions: secureFilePermissions], ofItemAtPath: configPath.path)
+        }
+        
+        try fileData.write(to: configPath)
+    }
+    
     /// Rotates the Master Key (Mnemonic) while preserving the internal Data Key.
     ///
     /// This allows the user to change their login mnemonic without losing access to their encrypted S3 data,
@@ -310,7 +338,7 @@ public struct StorageService {
         // To keep files readable, our new `Data Key` MUST be the result of `deriveKey(mnemonic)`.
         // This effectively "freezes" the current specific mnemonic's derived key as the persistent Data Key.
         let legacyDerivedKey = try EncryptionService.deriveKey(mnemonic: mnemonic)
-        let dataKeyBytes = legacyDerivedKey.withUnsafeBytes { Data($0) }
+        let dataKeyBytes = legacyDerivedKey.withUnsafeBytes { bytes in Data(bytes) }
         
         let config = EncryptedConfig(
             dataKey: dataKeyBytes,

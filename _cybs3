@@ -1,0 +1,100 @@
+#compdef cybs3
+
+# CybS3 Zsh Completion Script
+# Install by placing this file in a directory in $fpath and running 'compinit'
+
+_cybs3() {
+    local -a commands vault_commands key_commands
+
+    commands=(
+        'login:Authenticate with mnemonic'
+        'vaults:Manage S3 vault configurations'
+        'keys:Manage encryption keys'
+        'ls:List objects in bucket'
+        'cp:Copy files to/from S3'
+        'rm:Delete objects from S3'
+        'sync:Synchronize directories'
+        'mkdir:Create directories in S3'
+        'help:Show help information'
+        'version:Show version information'
+    )
+
+    vault_commands=(
+        'add:Add a new vault configuration'
+        'list:List all configured vaults'
+        'select:Select active vault'
+        'delete:Delete a vault configuration'
+    )
+
+    key_commands=(
+        'create:Generate a new mnemonic'
+        'show:Display current mnemonic'
+    )
+
+    _arguments -C \
+        '(-h --help)'{-h,--help}'[Show help information]' \
+        '(-v --verbose)'{-v,--verbose}'[Enable verbose output]' \
+        '(--vault -V)'{--vault,-V}'[Specify vault name]:vault:->vaults' \
+        '(--bucket -b)'{--bucket,-b}'[Specify bucket name]:bucket:' \
+        '(--endpoint -e)'{--endpoint,-e}'[Specify S3 endpoint]:endpoint:' \
+        '(--access-key)'{--access-key}'[Specify access key]:access_key:' \
+        '(--secret-key)'{--secret-key}'[Specify secret key]:secret_key:' \
+        '(--region -r)'{--region,-r}'[Specify AWS region]:region:' \
+        '(--ssl)'{--ssl}'[Use SSL/TLS]:ssl:(true false)' \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'cybs3 command' commands
+            ;;
+        vaults)
+            case $words[2] in
+                add)
+                    _arguments \
+                        '(--name -n)'{--name,-n}'[Vault name]:vault_name:' \
+                        '(--endpoint -e)'{--endpoint,-e}'[S3 endpoint]:endpoint:' \
+                        '(--access-key)'{--access-key}'[Access key]:access_key:' \
+                        '(--secret-key)'{--secret-key}'[Secret key]:secret_key:' \
+                        '(--bucket -b)'{--bucket,-b}'[Bucket name]:bucket:' \
+                        '(--region -r)'{--region,-r}'[AWS region]:region:'
+                    ;;
+                select)
+                    # Would ideally complete with available vaults
+                    _message 'vault name'
+                    ;;
+                delete)
+                    # Would ideally complete with available vaults
+                    _message 'vault name'
+                    ;;
+                *)
+                    _describe -t vault_commands 'vault command' vault_commands
+                    ;;
+            esac
+            ;;
+        keys)
+            _describe -t key_commands 'key command' key_commands
+            ;;
+        args)
+            case $words[1] in
+                cp|sync)
+                    _alternative \
+                        'files:: _files' \
+                        's3-paths:remote: _cybs3_s3_paths'
+                    ;;
+                ls|rm)
+                    _alternative \
+                        'files:: _files' \
+                        's3-paths:remote: _cybs3_s3_paths'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_cybs3_s3_paths() {
+    # Basic S3 path completion
+    compadd "$@" s3://
+}
+
+_cybs3 "$@"

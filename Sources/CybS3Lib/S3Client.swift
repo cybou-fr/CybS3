@@ -16,7 +16,7 @@ import FoundationXML
 // MARK: - S3 Error Types
 
 /// Errors that can occur during S3 operations.
-public enum S3Error: Error, LocalizedError {
+public enum S3Error: Error, LocalizedError, Equatable {
     /// The provided URL or endpoint was invalid.
     case invalidURL
     /// Authentication with S3 failed (e.g., invalid keys).
@@ -66,6 +66,86 @@ public enum S3Error: Error, LocalizedError {
             return "❌ Access Denied: Check your credentials and bucket policies."
         case .bucketNotEmpty:
             return "❌ Bucket Not Empty: Delete all objects before deleting the bucket."
+        }
+    }
+    
+    /// Provides actionable suggestions for resolving the error.
+    public var suggestions: [String] {
+        switch self {
+        case .authenticationFailed:
+            return [
+                "Verify your access key and secret key are correct",
+                "Check if your credentials have the necessary S3 permissions",
+                "Ensure the correct region is specified"
+            ]
+        case .bucketNotFound:
+            return [
+                "Verify the bucket name is correct",
+                "Check if the bucket exists in the specified region",
+                "Ensure you have permission to access the bucket"
+            ]
+        case .objectNotFound:
+            return [
+                "Verify the object key is correct",
+                "Check if the object exists in the bucket",
+                "Ensure you have permission to read the object"
+            ]
+        case .accessDenied:
+            return [
+                "Check your AWS credentials and permissions",
+                "Verify bucket policies allow your operations",
+                "Ensure you're using the correct region"
+            ]
+        case .invalidURL:
+            return [
+                "Check your endpoint URL format",
+                "Use https:// for secure connections",
+                "Verify the endpoint is reachable"
+            ]
+        case .requestFailed(let status, _, _):
+            if status == 429 {
+                return [
+                    "Too many requests - wait and retry",
+                    "Consider reducing request frequency",
+                    "Check AWS service limits"
+                ]
+            } else if status >= 500 {
+                return [
+                    "Server error - retry the operation",
+                    "Check AWS service status",
+                    "Try again later"
+                ]
+            } else {
+                return [
+                    "Check your request parameters",
+                    "Verify permissions and credentials",
+                    "Review AWS documentation for this error code"
+                ]
+            }
+        case .bucketNotEmpty:
+            return [
+                "Delete all objects in the bucket first",
+                "Use recursive delete if needed",
+                "Check for incomplete multipart uploads"
+            ]
+        case .fileAccessFailed:
+            return [
+                "Check file permissions",
+                "Verify the file path exists",
+                "Ensure write access to the directory"
+            ]
+        case .invalidResponse:
+            return [
+                "Check network connectivity",
+                "Verify endpoint configuration",
+                "Try the operation again"
+            ]
+        case .requestFailedLegacy:
+            return [
+                "Check your network connection",
+                "Verify credentials and permissions",
+                "Try the operation again"
+            ]
         }
     }
 }
@@ -293,18 +373,29 @@ public actor S3Client {
     private let bucket: String?
     private let region: String
     private lazy var httpClient: HTTPClient = {
-        // Configure HTTP client with connection pooling
+        // Configure HTTP client with optimized settings for performance
         var httpConfig = HTTPClient.Configuration()
+        httpConfig.redirectConfiguration = .follow(max: 5, allowCycles: false)
         httpConfig.connectionPool = HTTPClient.Configuration.ConnectionPool(
             idleTimeout: .seconds(Int64(configuration.connectionIdleTimeout)),
             concurrentHTTP1ConnectionsPerHostSoftLimit: configuration.maxConnectionsPerHost
         )
         httpConfig.timeout = HTTPClient.Configuration.Timeout(
-            connect: .seconds(30),
+            connect: .seconds(Int64(configuration.connectTimeout)),
             read: .seconds(Int64(configuration.requestTimeout))
         )
         
-        return HTTPClient(eventLoopGroupProvider: .shared(MultiThreadedEventLoopGroup(numberOfThreads: 1)), configuration: httpConfig)
+        // Use multi-threaded event loop group for better concurrency
+        #if os(macOS)
+        let threadCount = min(System.coreCount, 16) // Cap at 16 threads on macOS
+        #else
+        let threadCount = System.coreCount
+        #endif
+        
+        return HTTPClient(
+            eventLoopGroupProvider: .shared(MultiThreadedEventLoopGroup(numberOfThreads: threadCount)),
+            configuration: httpConfig
+        )
     }()
     private let signer: AWSV4Signer
     private let logger: Logger
@@ -316,16 +407,20 @@ public actor S3Client {
         public var maxConnectionsPerHost: Int
         /// Connection idle timeout in seconds.
         public var connectionIdleTimeout: Int
+        /// Connect timeout in seconds.
+        public var connectTimeout: Int
         /// Request timeout in seconds.
         public var requestTimeout: Int
         
         public init(
             maxConnectionsPerHost: Int = 8,
             connectionIdleTimeout: Int = 60,
+            connectTimeout: Int = 10,
             requestTimeout: Int = 300
         ) {
             self.maxConnectionsPerHost = maxConnectionsPerHost
             self.connectionIdleTimeout = connectionIdleTimeout
+            self.connectTimeout = connectTimeout
             self.requestTimeout = requestTimeout
         }
         
@@ -336,6 +431,7 @@ public actor S3Client {
         public static let highPerformance = Configuration(
             maxConnectionsPerHost: 16,
             connectionIdleTimeout: 120,
+            connectTimeout: 15,
             requestTimeout: 600
         )
     }
@@ -467,7 +563,7 @@ public actor S3Client {
     ///   - prefix: Limits the response to keys that begin with the specified prefix.
     ///   - delimiter: A delimiter is a character you use to group keys.
     /// - Returns: An array of `S3Object`s.
-    public func listObjects(prefix: String? = nil, delimiter: String? = nil) async throws -> [S3Object] {
+    public func listObjects(prefix: String? = nil, delimiter: String? = nil, maxKeys: Int? = nil) async throws -> [S3Object] {
         guard bucket != nil else { throw S3Error.bucketNotFound }
         
         var objects: [S3Object] = []
@@ -476,7 +572,7 @@ public actor S3Client {
         
         let batchSize = 1000
         
-        while isTruncated {
+        while isTruncated && (maxKeys == nil || objects.count < maxKeys!) {
             var queryItems: [URLQueryItem] = [
                 URLQueryItem(name: "list-type", value: "2")
             ]
@@ -486,7 +582,9 @@ public actor S3Client {
             if let delimiter = delimiter {
                 queryItems.append(URLQueryItem(name: "delimiter", value: delimiter))
             }
-            queryItems.append(URLQueryItem(name: "max-keys", value: String(batchSize)))
+            let remaining = maxKeys.map { $0 - objects.count } ?? batchSize
+            let requestBatchSize = min(batchSize, remaining)
+            queryItems.append(URLQueryItem(name: "max-keys", value: String(requestBatchSize)))
             
             if let token = continuationToken {
                 queryItems.append(URLQueryItem(name: "continuation-token", value: token))
@@ -625,6 +723,35 @@ public actor S3Client {
         return nil
     }
     
+    /// Downloads an object and returns its data.
+    ///
+    /// - Parameter key: The key of the object to download.
+    /// - Returns: The object's data.
+    /// - Throws: `S3Error` if the download fails.
+    public func getObject(key: String) async throws -> Data {
+        var data = Data()
+        for try await chunk in try await getObjectStream(key: key) {
+            data.append(chunk)
+        }
+        return data
+    }
+    
+    /// Uploads an object from data.
+    ///
+    /// - Parameters:
+    ///   - key: The key to assign to the object.
+    ///   - data: The data to upload.
+    ///   - metadata: Optional metadata to attach to the object.
+    /// - Throws: `S3Error` if the upload fails.
+    public func putObject(key: String, data: Data, metadata: [String: String]? = nil) async throws {
+        let buffer = ByteBuffer(data: data)
+        let stream = AsyncStream<ByteBuffer> { continuation in
+            continuation.yield(buffer)
+            continuation.finish()
+        }
+        try await putObject(key: key, stream: stream, length: Int64(data.count))
+    }
+    
     /// Uploads an object using a streaming body.
     ///
     /// - Parameters:
@@ -724,6 +851,28 @@ public actor S3Client {
             let errBody = try await response.body.collect(upTo: 1024 * 1024)
             let data = Data(buffer: errBody)
             throw S3ErrorParser.parse(data: data, status: Int(response.status.code))
+        }
+    }
+    
+    /// Creates a bucket if it doesn't already exist.
+    ///
+    /// - Note: This method checks if the bucket exists first, and only creates it if it doesn't.
+    public func createBucketIfNotExists() async throws {
+        guard let bucketName = bucket else {
+            throw S3Error.bucketNotFound
+        }
+        
+        // Check if bucket exists by trying to list objects
+        do {
+            _ = try await listObjects(prefix: nil, delimiter: nil)
+            // If we get here, bucket exists
+            return
+        } catch S3Error.objectNotFound {
+            // Bucket doesn't exist, create it
+            try await createBucket(name: bucketName)
+        } catch S3Error.bucketNotFound {
+            // Bucket doesn't exist, create it
+            try await createBucket(name: bucketName)
         }
     }
     
@@ -985,6 +1134,56 @@ public actor S3Client {
     }
 }
 
+// MARK: - AsyncSequence Extensions
+
+extension S3Client {
+    /// Returns an AsyncSequence that yields all objects in the bucket.
+    ///
+    /// - Parameters:
+    ///   - prefix: Optional prefix to filter objects.
+    ///   - delimiter: Optional delimiter for hierarchical listing.
+    /// - Returns: An AsyncThrowingStream of S3Object instances.
+    public func listObjects() -> AsyncThrowingStream<S3Object, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    // For streaming, we need to implement pagination manually
+                    // This is a simplified version that gets all objects at once
+                    let objects = try await listObjects(prefix: nil, delimiter: nil)
+                    for object in objects {
+                        continuation.yield(object)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+    
+    /// Returns an AsyncSequence that yields all objects with a given prefix.
+    ///
+    /// - Parameter prefix: The prefix to filter objects.
+    /// - Returns: An AsyncThrowingStream of S3Object instances.
+    public func listObjects(prefix: String) -> AsyncThrowingStream<S3Object, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    // For streaming, we need to implement pagination manually
+                    // This is a simplified version that gets all objects at once
+                    let objects = try await listObjects(prefix: prefix, delimiter: nil)
+                    for object in objects {
+                        continuation.yield(object)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Models
 
 /// Represents an object stored in S3 or a directory prefix.
@@ -1061,18 +1260,18 @@ private enum ISO8601DateFormatterFactory {
 // Simple thread-local storage implementation
 private final class ThreadLocal<T>: @unchecked Sendable {
     private var storage: [ObjectIdentifier: T] = [:]
-    private let lock = NSLock()
+    private let lock = CrossPlatformLock()
     
     var value: T? {
         get {
-            lock.lock()
-            defer { lock.unlock() }
-            return storage[ObjectIdentifier(Thread.current)]
+            lock.withLock {
+                storage[ObjectIdentifier(Thread.current)]
+            }
         }
         set {
-            lock.lock()
-            defer { lock.unlock() }
-            storage[ObjectIdentifier(Thread.current)] = newValue
+            lock.withLock {
+                storage[ObjectIdentifier(Thread.current)] = newValue
+            }
         }
     }
 }

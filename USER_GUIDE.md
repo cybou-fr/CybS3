@@ -383,12 +383,164 @@ File permissions are set to `600` (owner read/write only).
 
 ---
 
+## Cross-Platform Support
+
+CybS3 works on macOS, Linux, and Windows with platform-specific optimizations:
+
+### macOS
+- **Keychain Integration**: Secure mnemonic storage
+- **Optimized Locking**: Uses `os_unfair_lock` for performance
+- **Native Notifications**: System integration for watch mode
+
+### Linux
+- **Encrypted File Storage**: Secure credential storage in `~/.cybs3/`
+- **POSIX Threading**: Uses `pthread_mutex` for thread safety
+- **File Permissions**: Restrictive permissions (600) on sensitive files
+
+### Windows
+- **Credential Manager**: Secure storage integration
+- **Native Threading**: Windows threading primitives
+- **Path Handling**: Proper Windows path support
+
+### Platform-Specific Setup
+
+```bash
+# All platforms use the same commands
+cybs3 keys create  # Works identically across platforms
+cybs3 login        # Uses platform-specific secure storage
+cybs3 vaults add   # Cross-platform vault management
+```
+
+---
+
+## Performance Features
+
+### Concurrent Operations
+
+CybS3 supports parallel uploads and downloads for maximum throughput:
+
+```bash
+# Upload with 4 concurrent connections (default: 4)
+cybs3 files put large-file.zip --concurrency 8
+
+# Download with high parallelism
+cybs3 files get large-file.zip --concurrency 16
+
+# Folder sync with parallelism
+cybs3 folders sync ./data --concurrency 6
+```
+
+### Streaming Encryption
+
+Large files are processed in memory-efficient chunks:
+
+- **Chunk Size**: 1MB (configurable)
+- **Memory Usage**: Constant regardless of file size
+- **Progress Tracking**: Real-time upload/download progress
+
+### Connection Pooling
+
+HTTP connections are reused for better performance:
+
+- **Keep-Alive**: Persistent connections
+- **Connection Limits**: Configurable pool size
+- **Timeout Handling**: Automatic connection recovery
+
+### Performance Monitoring
+
+Monitor CybS3's performance characteristics:
+
+```bash
+# Run performance benchmarks
+cybs3 performance benchmark
+
+# Check system health
+cybs3 health check
+```
+
+---
+
+## Security Features
+
+### Enhanced Key Security
+
+- **PBKDF2 + HKDF**: Double key derivation for maximum security
+- **Secure Memory**: Automatic zeroing of sensitive data
+- **Key Rotation**: Change mnemonics without re-encrypting data
+
+### Audit Logging
+
+All operations are logged for security monitoring:
+
+```bash
+# View recent activity
+cybs3 health check --verbose
+
+# Logs are stored securely and never contain sensitive data
+```
+
+### Fault Tolerance
+
+CybS3 includes enterprise-grade resilience:
+
+- **Circuit Breaker**: Prevents cascade failures
+- **Retry Logic**: Exponential backoff for transient errors
+- **Health Monitoring**: Automatic system diagnostics
+
+### Secure Configuration
+
+- **Encrypted Config**: All settings stored encrypted
+- **File Permissions**: Restrictive access controls
+- **Platform Security**: Uses OS security facilities
+
+---
+
+## Advanced Configuration
+
+### Environment Variables
+
+```bash
+# Override default settings
+export CYBS3_CHUNK_SIZE=2097152          # 2MB chunks
+export CYBS3_MAX_CONCURRENCY=8           # Max parallel operations
+export CYBS3_CONNECTION_TIMEOUT=30       # Connection timeout (seconds)
+export CYBS3_RETRY_MAX_ATTEMPTS=5        # Max retry attempts
+```
+
+### Custom Chunk Sizes
+
+For specific performance requirements:
+
+```bash
+# Larger chunks for high-latency networks
+cybs3 files put large-file.dat --chunk-size 4194304  # 4MB
+
+# Smaller chunks for low-memory systems
+cybs3 files put small-file.dat --chunk-size 524288   # 512KB
+```
+
+### Health Monitoring
+
+Regular health checks ensure system reliability:
+
+```bash
+# Comprehensive system check
+cybs3 health check
+
+# Check specific components
+cybs3 health check --component encryption
+cybs3 health check --component network
+cybs3 health check --component storage
+```
+
+---
+
 ## Quick Reference
 
 | Command | Description |
 |---------|-------------|
-| `cybs3 login` | Store mnemonic in Keychain |
-| `cybs3 logout` | Remove mnemonic from Keychain |
+| `cybs3 login` | Store mnemonic in secure storage |
+| `cybs3 logout` | Remove mnemonic from secure storage |
 | `cybs3 keys create` | Generate new mnemonic |
 | `cybs3 keys rotate` | Change mnemonic (keep data access) |
 | `cybs3 vaults add --name X` | Add S3 connection |
@@ -398,6 +550,9 @@ File permissions are set to `600` (owner read/write only).
 | `cybs3 folders put <path>` | Upload folder (deduplicated) |
 | `cybs3 folders sync <path>` | Sync folder with S3 |
 | `cybs3 folders watch <path>` | Live sync on changes |
+| `cybs3 health check` | System diagnostics |
+| `cybs3 performance benchmark` | Performance testing |
+| `cybs3 --help` | Show all commands and options |
 
 ---
 
