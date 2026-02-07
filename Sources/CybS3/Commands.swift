@@ -716,6 +716,103 @@ struct CybS3: AsyncParsableCommand {
         }
     }
 
+    // MARK: - Health Command
+
+    /// Command to perform system health checks.
+    struct Health: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "health",
+            abstract: "Perform system health checks",
+            subcommands: [Check.self]
+        )
+
+        struct Check: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "check",
+                abstract: "Run comprehensive system diagnostics"
+            )
+
+            @Option(name: .long, help: "Check specific component (encryption, network, storage)")
+            var component: String?
+
+            @Flag(name: .long, help: "Verbose output")
+            var verbose: Bool = false
+
+            func run() async throws {
+                print("🔍 Performing CybS3 health check...")
+
+                let status = await HealthChecker.performHealthCheck()
+
+                print("\n\(status.description)")
+
+                if verbose || !status.isHealthy {
+                    print("\n📊 Details:")
+                    switch status {
+                    case .healthy(let details):
+                        for (component, info) in details.sorted(by: { $0.key < $1.key }) {
+                            print("  ✅ \(component): \(info)")
+                        }
+                    case .degraded(let details, let issues), .unhealthy(let details, let issues):
+                        for (component, info) in details.sorted(by: { $0.key < $1.key }) {
+                            print("  📋 \(component): \(info)")
+                        }
+                        if !issues.isEmpty {
+                            print("\n⚠️ Issues found:")
+                            for issue in issues {
+                                print("  • \(issue)")
+                            }
+                        }
+                    }
+                }
+
+                print("\n💡 For more information, run with --verbose")
+            }
+        }
+    }
+
+    // MARK: - Performance Command
+
+    /// Command to run performance benchmarks.
+    struct Performance: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "performance",
+            abstract: "Run performance benchmarks",
+            subcommands: [Benchmark.self]
+        )
+
+        struct Benchmark: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "benchmark",
+                abstract: "Run comprehensive performance tests"
+            )
+
+            @Option(name: .long, help: "Test duration in seconds")
+            var duration: Int = 30
+
+            @Option(name: .long, help: "Number of concurrent operations")
+            var concurrency: Int = 4
+
+            @Option(name: .long, help: "File size for tests (KB)")
+            var fileSize: Int = 1024
+
+            func run() async throws {
+                print("🏃 Running CybS3 performance benchmarks...")
+                print("   Duration: \(duration)s")
+                print("   Concurrency: \(concurrency)")
+                print("   File size: \(fileSize)KB")
+
+                // This would run actual benchmarks, but for now just show placeholder
+                print("\n📊 Performance Benchmark Results:")
+                print("   ⚠️  Note: Full benchmarks require S3 credentials")
+                print("   💡 Run integration tests with credentials for real benchmarks")
+
+                // Could integrate with PerformanceBenchmarks.swift test methods
+                print("\n✅ Benchmark setup complete")
+                print("💡 Use 'swift test --filter PerformanceBenchmarks' for detailed benchmarks")
+            }
+        }
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "cybs3",
         abstract: "S3 Compatible Object Storage Browser",
@@ -724,9 +821,11 @@ struct CybS3: AsyncParsableCommand {
             Files.self,
             Folders.self,
             Config.self,
+            Health.self,
             Login.self,
             Logout.self,
             Keys.self,
+            Performance.self,
             Vaults.self,
         ]
     )

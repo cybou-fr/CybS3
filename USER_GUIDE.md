@@ -420,13 +420,13 @@ cybs3 vaults add   # Cross-platform vault management
 CybS3 supports parallel uploads and downloads for maximum throughput:
 
 ```bash
-# Upload with 4 concurrent connections (default: 4)
+# Upload with high concurrency (planned feature)
 cybs3 files put large-file.zip --concurrency 8
 
-# Download with high parallelism
+# Download with high parallelism (planned feature)
 cybs3 files get large-file.zip --concurrency 16
 
-# Folder sync with parallelism
+# Folder sync with parallelism (planned feature)
 cybs3 folders sync ./data --concurrency 6
 ```
 
@@ -434,7 +434,7 @@ cybs3 folders sync ./data --concurrency 6
 
 Large files are processed in memory-efficient chunks:
 
-- **Chunk Size**: 1MB (configurable)
+- **Chunk Size**: 1MB (configurable via environment variables)
 - **Memory Usage**: Constant regardless of file size
 - **Progress Tracking**: Real-time upload/download progress
 
@@ -501,15 +501,15 @@ CybS3 includes enterprise-grade resilience:
 
 ```bash
 # Override default settings
-export CYBS3_CHUNK_SIZE=2097152          # 2MB chunks
-export CYBS3_MAX_CONCURRENCY=8           # Max parallel operations
+export CYBS3_CHUNK_SIZE=2097152          # 2MB chunks (planned feature)
+export CYBS3_MAX_CONCURRENCY=8           # Max parallel operations (planned feature)
 export CYBS3_CONNECTION_TIMEOUT=30       # Connection timeout (seconds)
 export CYBS3_RETRY_MAX_ATTEMPTS=5        # Max retry attempts
 ```
 
 ### Custom Chunk Sizes
 
-For specific performance requirements:
+For specific performance requirements (planned feature):
 
 ```bash
 # Larger chunks for high-latency networks
